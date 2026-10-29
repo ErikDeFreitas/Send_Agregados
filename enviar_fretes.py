@@ -11,22 +11,24 @@ Este arquivo contém o núcleo do sistema (usado pelo app.py) e também funciona
 import argparse
 import configparser
 import csv
+import hashlib
 import html
 import os
 import re
 import shutil
 import smtplib
+import ssl
 import sys
 import time
 import unicodedata
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+from email.message import EmailMessage
+from email.utils import formataddr
 from pathlib import Path
 
 import pandas as pd
 
-# no executável, config e log ficam ao lado do .exe
+# no executável, config, .env e log ficam ao lado do .exe
 if getattr(sys, "frozen", False):
     PASTA = Path(sys.executable).resolve().parent
 else:
@@ -34,11 +36,22 @@ else:
 PASTA_PREVIA = PASTA / "previas"
 ARQUIVO_LOG = PASTA / "log_envios.csv"
 ARQUIVO_CONFIG = PASTA / "config.ini"
-ESPERA_RECUSAS = 20  # segundos aguardando avisos de não entrega após o envio
+ARQUIVO_ENV = PASTA / ".env"
+ESPERA_RECUSAS = 20  # segundos aguardando avisos de não entrega após o envio (só Outlook)
+CABECALHO_LOG = ["data_hora", "cnpj_cpf", "nome", "email", "assunto", "status", "chave"]
+RE_EMAIL = re.compile(r"^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$")
 
 
 class ErroPlanilha(Exception):
     pass
+
+
+class ErroEnvio(Exception):
+    """Erro de envio com mensagem segura para exibir e registrar (sem credenciais)."""
+
+
+class ErroFatal(ErroEnvio):
+    """Erro que afeta o lote inteiro (conexão, login, remetente): não adianta continuar."""
 
 
 # ------------------------------------------------------------------ utilidades
@@ -124,13 +137,58 @@ def extrair_semana(textos) -> str:
     return f"Semanas {', '.join(nums[:-1])} e {nums[-1]}"
 
 
+def separar_emails(texto: str) -> list[str]:
+    return [e.strip() for e in re.split(r"[;,]", texto or "") if e.strip()]
+
+
+def emails_invalidos(texto: str) -> list[str]:
+    return [e for e in separar_emails(texto) if not RE_EMAIL.match(e)]
+
+
+def mascarar_documento(doc: str) -> str:
+    """Log sem o documento completo: 123.***.***-10 / 12.***.***/0001-90."""
+    f = formatar_documento(doc)
+    if len(doc) == 11:
+        return f"{f[:3]}.***.***-{f[-2:]}"
+    if len(doc) == 14:
+        return f"{f[:2]}.***.***/{f[-7:]}"
+    return "***"
+
+
+def chave_envio(doc: str, assunto: str) -> str:
+    """Identifica 'este extrato para este agregado' sem guardar o documento em claro."""
+    return hashlib.sha256(f"{doc}|{assunto}".encode("utf-8")).hexdigest()[:16]
+
+
+def limpar_cabecalho(texto: str) -> str:
+    """Remove quebras de linha que poderiam injetar cabeçalhos no e-mail."""
+    return re.sub(r"[\r\n]+", " ", str(texto)).strip()
+
+
 # ------------------------------------------------------------------ config e planilha
+
+def carregar_env(caminho=None):
+    """Lê o .env (CHAVE=valor) para as variáveis de ambiente, sem sobrescrever as existentes."""
+    caminho = Path(caminho or ARQUIVO_ENV)
+    if not caminho.is_file():
+        return
+    for linha in caminho.read_text(encoding="utf-8-sig").splitlines():
+        linha = linha.strip()
+        if not linha or linha.startswith("#") or "=" not in linha:
+            continue
+        chave, valor = linha.split("=", 1)
+        valor = valor.strip()
+        if len(valor) >= 2 and valor[0] == valor[-1] and valor[0] in "\"'":
+            valor = valor[1:-1]
+        os.environ.setdefault(chave.strip(), valor)
+
 
 def carregar_config(caminho=None) -> configparser.ConfigParser:
     caminho = Path(caminho or ARQUIVO_CONFIG)
     if not caminho.exists() and getattr(sys, "frozen", False):
         # primeira execução do .exe: cria o config.ini padrão ao lado do executável
         shutil.copy(Path(sys._MEIPASS) / "config.ini", caminho)
+    carregar_env()
     cfg = configparser.ConfigParser(interpolation=None)
     cfg.read(caminho, encoding="utf-8")
     return cfg
@@ -223,38 +281,75 @@ def montar_html(cfg, nome, doc, fretes: pd.DataFrame, periodo) -> str:
             return str(int(valor))  # evita "164560.0" em colunas numéricas com vazios
         return str(valor).strip()
 
-    estilo_th = "background:#1f4e79;color:#fff;padding:8px;border:1px solid #ccc;text-align:left"
-    estilo_td = "padding:6px 8px;border:1px solid #ccc"
-    cab = "".join(f'<th style="{estilo_th}">{html.escape(c)}</th>' for c in colunas)
+    # estilos inline e layout em tabelas: é o que Outlook, Gmail e celulares renderizam bem
+    fonte = "font-family:'Segoe UI',Arial,Helvetica,sans-serif"
+    estilo_th = (f"{fonte};background:#1f4e79;color:#ffffff;padding:9px 10px;font-size:12px;"
+                 "font-weight:600;text-align:left;white-space:nowrap;border-bottom:2px solid #163a5c")
+    estilo_td = f"{fonte};padding:8px 10px;font-size:13px;color:#222;border-bottom:1px solid #e3e8ee"
+    cab = "".join(f'<th style="{estilo_th}{";text-align:right" if c in moeda else ""}">'
+                  f'{html.escape(c)}</th>' for c in colunas)
 
     linhas = []
     for i, (_, f) in enumerate(fretes.iterrows()):
-        fundo = "#f2f6fa" if i % 2 else "#fff"
+        fundo = "#f6f9fc" if i % 2 else "#ffffff"
         tds = "".join(
-            f'<td style="{estilo_td};{"text-align:right" if c in moeda else ""}">'
+            f'<td style="{estilo_td}{";text-align:right;white-space:nowrap" if c in moeda else ""}">'
             f'{html.escape(celula(c, f[c]))}</td>' for c in colunas)
         linhas.append(f'<tr style="background:{fundo}">{tds}</tr>')
 
     total = ""
     if any(c in moeda for c in colunas):
         tds = "".join(
-            f'<td style="{estilo_td};text-align:right;font-weight:bold">'
+            f'<td style="{estilo_td};font-weight:700;background:#e4edf6;'
+            f'{"text-align:right;white-space:nowrap" if c in moeda else ""}">'
             f'{formatar_moeda(fretes[c].sum()) if c in moeda else ("TOTAL" if j == 0 else "")}</td>'
             for j, c in enumerate(colunas))
-        total = f'<tr style="background:#dde7f0">{tds}</tr>'
+        total = f"<tr>{tds}</tr>"
+
+    # cartões de resumo (quebram em linhas no celular)
+    col_total = next((c for c in colunas if c in moeda), None)
+    resumo = [("CNPJ/CPF", formatar_documento(doc)), ("Fretes", str(len(fretes)))]
+    if col_total:
+        resumo.append(("Total", formatar_moeda(fretes[col_total].sum())))
+    cartoes = "".join(
+        f'<div style="display:inline-block;min-width:140px;margin:0 8px 8px 0;padding:10px 14px;'
+        f'background:#f2f6fa;border-left:3px solid #1f4e79;vertical-align:top">'
+        f'<div style="{fonte};font-size:11px;color:#5b6b7b;text-transform:uppercase">{rotulo}</div>'
+        f'<div style="{fonte};font-size:16px;font-weight:700;color:#1f4e79">{html.escape(valor)}</div>'
+        f'</div>' for rotulo, valor in resumo)
 
     assinatura = html.escape(cfg["email"].get("assinatura", ""))
-    return f"""<html><body style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#222">
-<p>Olá, <b>{html.escape(nome)}</b>,</p>
-<p>Segue o extrato dos seus fretes referente a <b>{html.escape(periodo)}</b>.<br>
-CNPJ/CPF: {formatar_documento(doc)} &nbsp;|&nbsp; Quantidade de fretes: {len(fretes)}</p>
-<table style="border-collapse:collapse;font-size:13px">
+    texto = f"{fonte};font-size:14px;line-height:1.5;color:#222;margin:0 0 12px"
+    return f"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extrato de Fretes</title></head>
+<body style="margin:0;padding:0;background:#eef2f6">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef2f6">
+<tr><td align="center" style="padding:20px 8px">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+ style="max-width:760px;background:#ffffff;border:1px solid #dbe2ea">
+<tr><td style="background:#1f4e79;padding:18px 22px">
+<div style="{fonte};font-size:20px;font-weight:700;color:#ffffff">Extrato de Fretes</div>
+<div style="{fonte};font-size:13px;color:#d6e2ee;margin-top:4px">{html.escape(periodo)}</div>
+</td></tr>
+<tr><td style="padding:22px">
+<p style="{texto}">Olá, <b>{html.escape(nome)}</b>,</p>
+<p style="{texto}">Segue o extrato dos seus fretes referente a <b>{html.escape(periodo)}</b>.</p>
+<div style="margin:4px 0 14px">{cartoes}</div>
+<div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;min-width:560px">
 <thead><tr>{cab}</tr></thead>
 <tbody>{''.join(linhas)}{total}</tbody>
 </table>
-<p>Este é um e-mail automático. Por favor, não responda.</p>
-<p>Em caso de dúvidas, favor entrar em contato pelo e-mail agregados@tcm.com.br</p>
-<p>Atenciosamente,<br>{assinatura}</p>
+</div>
+<p style="{texto};margin-top:20px">Este é um e-mail automático. Por favor, não responda.</p>
+<p style="{texto}">Em caso de dúvidas, favor entrar em contato pelo e-mail agregados@tcm.com.br</p>
+<p style="{texto}">Atenciosamente,<br>{assinatura}</p>
+</td></tr>
+</table>
+</td></tr>
+</table>
 </body></html>"""
 
 
@@ -277,8 +372,8 @@ def preparar_envios(cfg, df, emails, docs=None, periodo_fixo="") -> list[dict]:
             textos = list(fretes[col_periodo].dropna().astype(str).str.strip().unique())
         periodo = periodo_fixo or " / ".join(textos)
         semana = periodo_fixo or extrair_semana(textos)
-        assunto = cfg["email"]["assunto"].format(
-            nome=nome, documento=formatar_documento(doc), periodo=periodo, semana=semana)
+        assunto = limpar_cabecalho(cfg["email"]["assunto"].format(
+            nome=nome, documento=formatar_documento(doc), periodo=periodo, semana=semana))
         envios.append({
             "doc": doc,
             "nome": nome,
@@ -313,32 +408,122 @@ def enviar_outlook(para, assunto, corpo, remetente="", cc=""):
     msg.Send()
 
 
-def enviar_smtp(cfg, para, assunto, corpo, remetente="", cc=""):
-    s = cfg["smtp"]
-    senha = os.environ.get("SMTP_SENHA")
-    if not senha:
-        raise RuntimeError("Defina a variável de ambiente SMTP_SENHA com a senha do e-mail.")
-    remetente = remetente or s["remetente"]
-    msg = MIMEMultipart("alternative")
-    msg["From"] = remetente
-    msg["To"] = para
-    destinos = [e.strip() for e in para.split(";") if e.strip()]
-    if cc:
-        msg["Cc"] = cc
-        destinos += [e.strip() for e in cc.split(";") if e.strip()]
-    msg["Subject"] = assunto
-    msg.attach(MIMEText(corpo, "html", "utf-8"))
-    with smtplib.SMTP(s["servidor"], s.getint("porta")) as srv:
-        srv.starttls()
-        srv.login(s["usuario"], senha)
-        srv.sendmail(remetente, destinos, msg.as_string())
+def html_para_texto(corpo: str) -> str:
+    """Versão em texto simples do e-mail, para leitores que não exibem HTML."""
+    t = re.sub(r"(?is)<(head|style).*?</\1>", "", corpo)
+    t = re.sub(r"(?i)<br\s*/?>|</(p|tr|div|h\d)>", "\n", t)
+    t = re.sub(r"(?i)</t[dh]>", "\t", t)
+    t = html.unescape(re.sub(r"<[^>]+>", "", t))
+    return re.sub(r"\n\s*\n+", "\n\n", re.sub(r"[ \t]+\n", "\n", t)).strip()
 
 
-def enviar(cfg, envio, remetente="", cc=""):
+def remetente_padrao(cfg) -> str:
+    """Remetente usado quando o campo fica vazio."""
     if cfg["email"].get("metodo", "outlook") == "outlook":
-        enviar_outlook(envio["email"], envio["assunto"], envio["corpo"], remetente, cc)
-    else:
-        enviar_smtp(cfg, envio["email"], envio["assunto"], envio["corpo"], remetente, cc)
+        return ""  # e-mail logado no Outlook
+    return (cfg["smtp"].get("remetente") or os.environ.get("SMTP_USUARIO")
+            or cfg["smtp"].get("usuario", ""))
+
+
+class Enviador:
+    """
+    Envia os e-mails de um lote pelo método do config.ini (smtp ou outlook).
+    No SMTP, abre UMA conexão segura (STARTTLS com certificado verificado) para o lote todo.
+    Uso:  with Enviador(cfg) as env: env.enviar(envio, remetente, cc)
+    """
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.metodo = cfg["email"].get("metodo", "outlook").strip().lower()
+        self.conexao = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.fechar()
+
+    def fechar(self):
+        if self.conexao is not None:
+            try:
+                self.conexao.quit()
+            except Exception:
+                pass
+            self.conexao = None
+
+    def _conectar(self):
+        s = self.cfg["smtp"]
+        usuario = os.environ.get("SMTP_USUARIO") or s.get("usuario", "")
+        senha = os.environ.get("SMTP_SENHA", "")
+        if not usuario or not senha:
+            raise ErroFatal("Credenciais SMTP não encontradas. Verifique SMTP_USUARIO e SMTP_SENHA "
+                            f"no arquivo .env ({ARQUIVO_ENV.parent}).")
+        try:
+            conexao = smtplib.SMTP(s.get("servidor", "smtp.office365.com"), s.getint("porta", 587),
+                                   timeout=30)
+            conexao.ehlo()
+            conexao.starttls(context=ssl.create_default_context())
+            conexao.ehlo()
+            conexao.login(usuario, senha)
+        except smtplib.SMTPAuthenticationError:
+            raise ErroFatal("Falha de autenticação no SMTP: usuário/senha incorretos ou envio SMTP "
+                            "desabilitado para a conta.") from None
+        except ssl.SSLError:
+            raise ErroFatal("Falha na conexão segura (TLS) com o servidor SMTP.") from None
+        except (OSError, smtplib.SMTPException) as e:
+            raise ErroFatal(f"Não foi possível conectar ao servidor SMTP ({type(e).__name__}).") from None
+        self.conexao = conexao
+
+    def enviar(self, envio, remetente="", cc=""):
+        para = list(dict.fromkeys(separar_emails(envio["email"])))
+        ja = {e.lower() for e in para}
+        copia = [e for e in dict.fromkeys(separar_emails(cc)) if e.lower() not in ja]
+        invalidos = emails_invalidos(envio["email"]) + emails_invalidos(cc)
+        if not para:
+            raise ErroEnvio("Destinatário sem e-mail cadastrado.")
+        if invalidos:
+            raise ErroEnvio(f"E-mail inválido: {', '.join(invalidos)}")
+        assunto = limpar_cabecalho(envio["assunto"])
+
+        if self.metodo == "outlook":
+            try:
+                enviar_outlook("; ".join(para), assunto, envio["corpo"], remetente, "; ".join(copia))
+            except Exception as e:
+                raise ErroEnvio(f"Falha ao enviar pelo Outlook ({type(e).__name__}).") from None
+            return
+
+        remetente = remetente or remetente_padrao(self.cfg)
+        if emails_invalidos(remetente) or not remetente:
+            raise ErroFatal(f"Remetente inválido: {remetente or '(vazio)'}")
+        msg = EmailMessage()
+        nome_rem = limpar_cabecalho(self.cfg["smtp"].get("nome_remetente", ""))
+        msg["From"] = formataddr((nome_rem, remetente)) if nome_rem else remetente
+        msg["To"] = ", ".join(para)
+        if copia:
+            msg["Cc"] = ", ".join(copia)
+        msg["Subject"] = assunto
+        msg.set_content(html_para_texto(envio["corpo"]))
+        msg.add_alternative(envio["corpo"], subtype="html")
+
+        for tentativa in (1, 2):
+            if self.conexao is None:
+                self._conectar()
+            try:
+                self.conexao.send_message(msg, from_addr=remetente, to_addrs=para + copia)
+                return
+            except smtplib.SMTPServerDisconnected:
+                self.conexao = None  # servidor encerrou a sessão: reconecta uma vez
+                if tentativa == 2:
+                    raise ErroFatal("A conexão com o servidor SMTP foi perdida.") from None
+            except smtplib.SMTPRecipientsRefused as e:
+                raise ErroEnvio(f"Destinatário recusado pelo servidor: {', '.join(e.recipients)}") from None
+            except (smtplib.SMTPSenderRefused, smtplib.SMTPDataError) as e:
+                if b"SendAsDenied" in (e.smtp_error or b""):
+                    raise ErroFatal(f"O servidor recusou o remetente '{remetente}': a conta SMTP não "
+                                    "tem permissão para enviar como esse endereço.") from None
+                raise ErroEnvio(f"O servidor recusou a mensagem (código {e.smtp_code}).") from None
+            except smtplib.SMTPException as e:
+                raise ErroEnvio(f"Erro no envio SMTP ({type(e).__name__}).") from None
 
 
 def buscar_recusas(desde: datetime, assuntos) -> dict:
@@ -373,14 +558,51 @@ def buscar_recusas(desde: datetime, assuntos) -> dict:
     return recusas
 
 
-def registrar_log(doc, nome, email, status):
+def _preparar_log():
+    """Se o log for do formato antigo (sem chave/assunto), arquiva e começa um novo."""
+    if not ARQUIVO_LOG.exists():
+        return
+    with open(ARQUIVO_LOG, newline="", encoding="utf-8-sig") as f:
+        cabecalho = next(csv.reader(f, delimiter=";"), [])
+    if cabecalho != CABECALHO_LOG:
+        ARQUIVO_LOG.rename(ARQUIVO_LOG.with_name(
+            f"log_envios_anterior_{datetime.now():%Y%m%d_%H%M%S}.csv"))
+
+
+def registrar_log(doc, nome, email, status, assunto=""):
+    """Registra o envio. O CPF/CNPJ vai mascarado; senha e conteúdo do e-mail nunca são gravados."""
+    _preparar_log()
     novo = not ARQUIVO_LOG.exists()
     with open(ARQUIVO_LOG, "a", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
         if novo:
-            w.writerow(["data_hora", "cnpj_cpf", "nome", "email", "status"])
-        w.writerow([datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-                    formatar_documento(doc), nome, email, status])
+            w.writerow(CABECALHO_LOG)
+        w.writerow([datetime.now().strftime("%d/%m/%Y %H:%M:%S"), mascarar_documento(doc),
+                    limpar_cabecalho(nome), email, limpar_cabecalho(assunto),
+                    limpar_cabecalho(status), chave_envio(doc, assunto) if assunto else ""])
+
+
+def envios_anteriores() -> dict:
+    """{chave: data_hora} dos extratos já enviados com sucesso (recusas posteriores anulam o envio)."""
+    if not ARQUIVO_LOG.exists():
+        return {}
+    enviados = {}
+    with open(ARQUIVO_LOG, newline="", encoding="utf-8-sig") as f:
+        for linha in csv.DictReader(f, delimiter=";"):
+            chave = linha.get("chave")
+            if not chave:
+                continue
+            if linha.get("status") == "ENVIADO":
+                enviados[chave] = linha.get("data_hora", "")
+            elif linha.get("status", "").startswith("RECUSADO"):
+                enviados.pop(chave, None)
+    return enviados
+
+
+def ja_enviado(envio, anteriores=None):
+    """Data/hora do envio anterior deste mesmo extrato, ou None."""
+    anteriores = envios_anteriores() if anteriores is None else anteriores
+    return anteriores.get(chave_envio(envio["doc"], envio.get("assunto", "")))
 
 
 # ------------------------------------------------------------------ linha de comando
@@ -395,6 +617,8 @@ def main():
                     help="Envia de fato. Sem isso, só gera as prévias em HTML")
     ap.add_argument("--planilha", help="Planilha a usar (sobrescreve o config.ini)")
     ap.add_argument("--periodo", help="Sobrescreve o período/semana do e-mail")
+    ap.add_argument("--reenviar", action="store_true",
+                    help="Envia mesmo que o extrato já tenha sido enviado antes")
     ap.add_argument("--config", default=str(ARQUIVO_CONFIG))
     args = ap.parse_args()
 
@@ -423,40 +647,50 @@ def main():
     remetente = cfg["email"].get("enviar_como", "")
     cc = cfg["email"].get("cc", "")
     intervalo = cfg["email"].getfloat("intervalo_segundos", 5)
+    anteriores = envios_anteriores()
     inicio = datetime.now()
     enviados = []
     ok = falhas = 0
 
-    for e in envios:
-        if e.get("erro"):
-            print(f"[AVISO] {formatar_documento(e['doc'])}: {e['erro']}")
-            falhas += 1
-            continue
+    with Enviador(cfg) as enviador:
+        for e in envios:
+            if e.get("erro"):
+                print(f"[AVISO] {formatar_documento(e['doc'])}: {e['erro']}")
+                falhas += 1
+                continue
 
-        if not args.enviar:
-            arq = PASTA_PREVIA / f"{e['doc']}_{re.sub(r'[^\w]+', '_', e['nome'])[:40]}.html"
-            arq.write_text(e["corpo"], encoding="utf-8")
-            print(f"[PRÉVIA] {e['assunto']} -> {e['email'] or 'SEM E-MAIL'} | {arq.name}")
-            ok += 1
-            continue
+            if not args.enviar:
+                arq = PASTA_PREVIA / f"{e['doc']}_{re.sub(r'[^\w]+', '_', e['nome'])[:40]}.html"
+                arq.write_text(e["corpo"], encoding="utf-8")
+                print(f"[PRÉVIA] {e['assunto']} -> {e['email'] or 'SEM E-MAIL'} | {arq.name}")
+                ok += 1
+                continue
 
-        if not e["email"]:
-            print(f"[ERRO] {e['nome']} ({formatar_documento(e['doc'])}): sem e-mail cadastrado")
-            registrar_log(e["doc"], e["nome"], "", "SEM E-MAIL")
-            falhas += 1
-            continue
-        if enviados:
-            time.sleep(intervalo)
-        try:
-            enviar(cfg, e, remetente, cc)
-            print(f"[ENVIADO] {e['nome']} -> {e['email']} | {e['fretes']} frete(s)")
-            registrar_log(e["doc"], e["nome"], e["email"], "ENVIADO")
-            enviados.append(e)
-            ok += 1
-        except Exception as erro:
-            print(f"[ERRO] {e['nome']} -> {e['email']}: {erro}")
-            registrar_log(e["doc"], e["nome"], e["email"], f"ERRO: {erro}")
-            falhas += 1
+            if not e["email"]:
+                print(f"[ERRO] {e['nome']} ({formatar_documento(e['doc'])}): sem e-mail cadastrado")
+                registrar_log(e["doc"], e["nome"], "", "SEM E-MAIL", e["assunto"])
+                falhas += 1
+                continue
+            anterior = ja_enviado(e, anteriores)
+            if anterior and not args.reenviar:
+                print(f"[PULADO] {e['nome']}: este extrato já foi enviado em {anterior} "
+                      "(use --reenviar para enviar de novo)")
+                continue
+            if enviados:
+                time.sleep(intervalo)
+            try:
+                enviador.enviar(e, remetente, cc)
+                print(f"[ENVIADO] {e['nome']} -> {e['email']} | {e['fretes']} frete(s)")
+                registrar_log(e["doc"], e["nome"], e["email"], "ENVIADO", e["assunto"])
+                enviados.append(e)
+                ok += 1
+            except ErroEnvio as erro:
+                print(f"[ERRO] {e['nome']} -> {e['email']}: {erro}")
+                registrar_log(e["doc"], e["nome"], e["email"], f"ERRO: {erro}", e["assunto"])
+                falhas += 1
+                if isinstance(erro, ErroFatal):
+                    print("Envio interrompido: o erro afeta todos os e-mails do lote.")
+                    break
 
     if enviados and cfg["email"].get("metodo", "outlook") == "outlook":
         print(f"\nAguardando {ESPERA_RECUSAS}s por avisos de não entrega do servidor...")
@@ -465,7 +699,8 @@ def main():
         for e in enviados:
             if e["assunto"] in recusas:
                 print(f"[RECUSADO] {e['nome']} -> {e['email']}: {recusas[e['assunto']]}")
-                registrar_log(e["doc"], e["nome"], e["email"], f"RECUSADO: {recusas[e['assunto']]}")
+                registrar_log(e["doc"], e["nome"], e["email"], f"RECUSADO: {recusas[e['assunto']]}",
+                              e["assunto"])
                 ok -= 1
                 falhas += 1
 

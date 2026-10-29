@@ -56,15 +56,21 @@ class App:
         ttk.Button(topo, text="Selecionar planilha...", command=self.selecionar_planilha).grid(
             row=0, column=2, sticky="ew")
 
+        # preferências separadas por método, para valores do Outlook não valerem no SMTP
+        self.metodo = self.cfg["email"].get("metodo", "outlook").strip().lower()
+        self.chave_rem, self.chave_cc = f"remetente_{self.metodo}", f"cc_{self.metodo}"
+        padrao = ef.remetente_padrao(self.cfg)
+
         ttk.Label(topo, text="Remetente:").grid(row=1, column=0, sticky="w", pady=3)
         self.var_remetente = tk.StringVar(
-            value=self.prefs.get("remetente", self.cfg["email"].get("enviar_como", "")))
+            value=self.prefs.get(self.chave_rem, self.cfg["email"].get("enviar_como", "")))
         ttk.Entry(topo, textvariable=self.var_remetente).grid(row=1, column=1, sticky="ew", padx=5)
-        ttk.Label(topo, text="vazio = e-mail logado no Outlook", foreground="gray").grid(
-            row=1, column=2, sticky="w")
+        dica = f"vazio = {padrao}" if padrao else "vazio = e-mail logado no Outlook"
+        ttk.Label(topo, text=dica, foreground="gray").grid(row=1, column=2, sticky="w")
 
         ttk.Label(topo, text="Cópia (CC):").grid(row=2, column=0, sticky="w", pady=3)
-        self.var_cc = tk.StringVar(value=self.prefs.get("cc", self.cfg["email"].get("cc", "")))
+        self.var_cc = tk.StringVar(
+            value=self.prefs.get(self.chave_cc, self.cfg["email"].get("cc", "")))
         ttk.Entry(topo, textvariable=self.var_cc).grid(row=2, column=1, sticky="ew", padx=5)
         ttk.Label(topo, text="separe vários com ;", foreground="gray").grid(
             row=2, column=2, sticky="w")
@@ -205,19 +211,58 @@ class App:
         except ValueError:
             messagebox.showwarning("Intervalo", "Informe o intervalo em segundos (ex.: 5).")
             return
+
+        # validação dos endereços antes de enviar qualquer coisa
+        problemas = ef.emails_invalidos(remetente) + ef.emails_invalidos(cc)
+        if problemas:
+            messagebox.showwarning("E-mail inválido",
+                                   "Corrija o remetente/CC:\n" + "\n".join(problemas))
+            return
+        invalidos = [e for e in validos if ef.emails_invalidos(e["email"])]
+        if invalidos:
+            lista_inv = "\n".join(f"{e['nome']}: {e['email']}" for e in invalidos[:10])
+            if not messagebox.askyesno(
+                    "E-mails inválidos",
+                    f"{len(invalidos)} agregado(s) com e-mail inválido na planilha:\n\n{lista_inv}"
+                    "\n\nContinuar enviando apenas para os demais?"):
+                return
+            validos = [e for e in validos if e not in invalidos]
+            if not validos:
+                return
+
+        # prevenção de duplicidade: mesmo extrato (agregado + assunto) já enviado
+        anteriores = ef.envios_anteriores()
+        repetidos = [(e, ef.ja_enviado(e, anteriores)) for e in validos if ef.ja_enviado(e, anteriores)]
+        if repetidos:
+            lista_rep = "\n".join(f"{e['nome']} (em {quando})" for e, quando in repetidos[:10])
+            resp = messagebox.askyesnocancel(
+                "Extrato já enviado",
+                f"{len(repetidos)} agregado(s) já receberam este mesmo extrato:\n\n{lista_rep}\n\n"
+                "Sim = reenviar para eles também\nNão = enviar só para os que ainda não receberam\n"
+                "Cancelar = não enviar nada")
+            if resp is None:
+                return
+            if resp is False:
+                ja = {e["doc"] for e, _ in repetidos}
+                validos = [e for e in validos if e["doc"] not in ja]
+                if not validos:
+                    messagebox.showinfo("Enviar", "Todos os selecionados já receberam este extrato.")
+                    return
+
+        rotulo_rem = remetente or ef.remetente_padrao(self.cfg) or "e-mail logado no Outlook"
         texto = (f"Enviar {len(validos)} e-mail(s)?\n\n"
-                 f"Remetente: {remetente or 'e-mail logado no Outlook'}\n"
+                 f"Remetente: {rotulo_rem}\n"
                  f"Cópia (CC): {cc or '-'}\n"
                  f"Intervalo entre envios: {intervalo:g} s")
         if sem_email:
             texto += f"\n\n{len(sem_email)} selecionado(s) sem e-mail serão ignorados."
-        if remetente:
+        if remetente and self.metodo == "outlook":
             texto += ("\n\nComo há remetente definido, o primeiro e-mail será verificado antes "
                       "de continuar (cerca de 20 s).")
         if not messagebox.askyesno("Confirmar envio", texto):
             return
 
-        self.prefs.update(remetente=remetente, cc=cc, intervalo=f"{intervalo:g}")
+        self.prefs.update({self.chave_rem: remetente, self.chave_cc: cc, "intervalo": f"{intervalo:g}"})
         salvar_prefs(self.prefs)
         self.enviando = True
         self.parar.clear()
@@ -243,7 +288,8 @@ class App:
             recusas = ef.buscar_recusas(inicio, [e["assunto"] for e in pendentes])
             for e in [e for e in pendentes if e["assunto"] in recusas]:
                 e["recusado"] = recusas[e["assunto"]]
-                ef.registrar_log(e["doc"], e["nome"], e["email"], f"RECUSADO: {e['recusado']}")
+                ef.registrar_log(e["doc"], e["nome"], e["email"], f"RECUSADO: {e['recusado']}",
+                                 e["assunto"])
                 self.fila.put(("status", e["doc"], "Recusado", "erro"))
                 self.fila.put(("log", f"[RECUSADO] {e['nome']} -> {e['email']}: {e['recusado']}"))
                 pendentes.remove(e)
@@ -251,11 +297,13 @@ class App:
         return achou
 
     def _enviar_thread(self, envios, remetente, cc, intervalo):
-        import pythoncom  # o Outlook (COM) precisa ser inicializado em cada thread
-        pythoncom.CoInitialize()
+        outlook = self.metodo == "outlook"
+        if outlook:
+            import pythoncom  # o Outlook (COM) precisa ser inicializado em cada thread
+            pythoncom.CoInitialize()
         inicio = datetime.now()
-        outlook = self.cfg["email"].get("metodo", "outlook") == "outlook"
         enviados, falhas, aviso = [], 0, ""
+        enviador = ef.Enviador(self.cfg)
         try:
             for e in envios:
                 if self.parar.is_set() or (enviados and self.parar.wait(intervalo)):
@@ -263,16 +311,21 @@ class App:
                     break
                 self.fila.put(("status", e["doc"], "Enviando...", ""))
                 try:
-                    ef.enviar(self.cfg, e, remetente, cc)
-                    ef.registrar_log(e["doc"], e["nome"], e["email"], "ENVIADO")
+                    enviador.enviar(e, remetente, cc)
+                    ef.registrar_log(e["doc"], e["nome"], e["email"], "ENVIADO", e["assunto"])
                     self.fila.put(("status", e["doc"], "Enviado", "enviado"))
                     self.fila.put(("log", f"[ENVIADO] {e['nome']} -> {e['email']}"))
                     enviados.append(e)
                 except Exception as erro:
-                    ef.registrar_log(e["doc"], e["nome"], e["email"], f"ERRO: {erro}")
+                    if not isinstance(erro, ef.ErroEnvio):  # nunca exibe detalhes internos
+                        erro = ef.ErroEnvio(f"Erro inesperado ({type(erro).__name__}).")
+                    ef.registrar_log(e["doc"], e["nome"], e["email"], f"ERRO: {erro}", e["assunto"])
                     self.fila.put(("status", e["doc"], "Erro", "erro"))
                     self.fila.put(("log", f"[ERRO] {e['nome']} -> {e['email']}: {erro}"))
                     falhas += 1
+                    if isinstance(erro, ef.ErroFatal):
+                        aviso = f"{erro}\n\nO envio foi interrompido, pois o erro afeta todos os e-mails."
+                        break
                     continue
 
                 # com remetente definido, confirma no 1º envio se o servidor aceitou
@@ -291,7 +344,9 @@ class App:
                 self.fila.put(("log", f"Aguardando {ef.ESPERA_RECUSAS}s por avisos de não entrega..."))
                 self._aguardar_recusas(inicio, restantes, ef.ESPERA_RECUSAS)
         finally:
-            pythoncom.CoUninitialize()
+            enviador.fechar()
+            if outlook:
+                pythoncom.CoUninitialize()
             recusados = sum(1 for e in enviados if "recusado" in e)
             self.fila.put(("fim", len(enviados) - recusados, falhas + recusados, aviso))
 
