@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+
+# Build do executável
+dist/
+build/
+*.spec
+
+# Dados gerados (contêm CNPJ/CPF e e-mails de agregados)
+previas/
+log_envios.csv
+preferencias.json
+
+# Planilhas de dados
+*.xlsx
+*.xlsm
+*.xls
