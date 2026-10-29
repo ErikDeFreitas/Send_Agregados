@@ -5,8 +5,10 @@ import json
 import queue
 import tempfile
 import threading
+import time
 import tkinter as tk
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -37,6 +39,7 @@ class App:
         self.envios = {}
         self.fila = queue.Queue()
         self.enviando = False
+        self.parar = threading.Event()
 
         root.title("Extrato de Fretes - Agregados")
         root.geometry("980x620")
@@ -66,6 +69,14 @@ class App:
         ttk.Label(topo, text="separe vários com ;", foreground="gray").grid(
             row=2, column=2, sticky="w")
 
+        ttk.Label(topo, text="Intervalo (s):").grid(row=3, column=0, sticky="w", pady=3)
+        self.var_intervalo = tk.StringVar(value=str(
+            self.prefs.get("intervalo", self.cfg["email"].get("intervalo_segundos", "5"))))
+        ttk.Spinbox(topo, from_=0, to=300, width=6, textvariable=self.var_intervalo).grid(
+            row=3, column=1, sticky="w", padx=5)
+        ttk.Label(topo, text="espera entre um envio e outro", foreground="gray").grid(
+            row=3, column=2, sticky="w")
+
         meio = ttk.Frame(root, padding=(10, 0))
         meio.pack(fill="both", expand=True)
         colunas = ("doc", "nome", "fretes", "total", "email", "status")
@@ -92,6 +103,8 @@ class App:
         ttk.Button(botoes, text="Visualizar e-mail", command=self.visualizar).pack(side="left", padx=5)
         self.btn_enviar = ttk.Button(botoes, text="Enviar selecionados", command=self.enviar_selecionados)
         self.btn_enviar.pack(side="right")
+        self.btn_parar = ttk.Button(botoes, text="Parar", state="disabled", command=self.parar_envio)
+        self.btn_parar.pack(side="right", padx=5)
         self.var_resumo = tk.StringVar(value="Selecione a planilha para começar.")
         ttk.Label(botoes, textvariable=self.var_resumo).pack(side="left", padx=15)
 
@@ -187,41 +200,100 @@ class App:
 
         remetente = self.var_remetente.get().strip()
         cc = self.var_cc.get().strip()
+        try:
+            intervalo = max(0.0, float(self.var_intervalo.get().replace(",", ".")))
+        except ValueError:
+            messagebox.showwarning("Intervalo", "Informe o intervalo em segundos (ex.: 5).")
+            return
         texto = (f"Enviar {len(validos)} e-mail(s)?\n\n"
                  f"Remetente: {remetente or 'e-mail logado no Outlook'}\n"
-                 f"Cópia (CC): {cc or '-'}")
+                 f"Cópia (CC): {cc or '-'}\n"
+                 f"Intervalo entre envios: {intervalo:g} s")
         if sem_email:
             texto += f"\n\n{len(sem_email)} selecionado(s) sem e-mail serão ignorados."
+        if remetente:
+            texto += ("\n\nComo há remetente definido, o primeiro e-mail será verificado antes "
+                      "de continuar (cerca de 20 s).")
         if not messagebox.askyesno("Confirmar envio", texto):
             return
 
-        self.prefs.update(remetente=remetente, cc=cc)
+        self.prefs.update(remetente=remetente, cc=cc, intervalo=f"{intervalo:g}")
         salvar_prefs(self.prefs)
         self.enviando = True
+        self.parar.clear()
         self.btn_enviar.configure(state="disabled")
-        threading.Thread(target=self._enviar_thread, args=(validos, remetente, cc), daemon=True).start()
+        self.btn_parar.configure(state="normal")
+        envios = [dict(e) for e in validos]  # cópia: marcações de recusa não afetam a lista
+        threading.Thread(target=self._enviar_thread, args=(envios, remetente, cc, intervalo),
+                         daemon=True).start()
 
-    def _enviar_thread(self, envios, remetente, cc):
+    def parar_envio(self):
+        self.parar.set()
+        self.btn_parar.configure(state="disabled")
+        self.escrever_log("Parando após o envio atual...")
+
+    def _aguardar_recusas(self, inicio, envios, espera) -> bool:
+        """Consulta a Caixa de Entrada por avisos de não entrega; marca os recusados."""
+        limite = time.monotonic() + espera
+        pendentes = list(envios)
+        achou = False
+        while pendentes and time.monotonic() < limite:
+            if self.parar.wait(4):
+                break
+            recusas = ef.buscar_recusas(inicio, [e["assunto"] for e in pendentes])
+            for e in [e for e in pendentes if e["assunto"] in recusas]:
+                e["recusado"] = recusas[e["assunto"]]
+                ef.registrar_log(e["doc"], e["nome"], e["email"], f"RECUSADO: {e['recusado']}")
+                self.fila.put(("status", e["doc"], "Recusado", "erro"))
+                self.fila.put(("log", f"[RECUSADO] {e['nome']} -> {e['email']}: {e['recusado']}"))
+                pendentes.remove(e)
+                achou = True
+        return achou
+
+    def _enviar_thread(self, envios, remetente, cc, intervalo):
         import pythoncom  # o Outlook (COM) precisa ser inicializado em cada thread
         pythoncom.CoInitialize()
-        ok = falhas = 0
+        inicio = datetime.now()
+        outlook = self.cfg["email"].get("metodo", "outlook") == "outlook"
+        enviados, falhas, aviso = [], 0, ""
         try:
             for e in envios:
+                if self.parar.is_set() or (enviados and self.parar.wait(intervalo)):
+                    aviso = "Envio interrompido pelo usuário."
+                    break
                 self.fila.put(("status", e["doc"], "Enviando...", ""))
                 try:
                     ef.enviar(self.cfg, e, remetente, cc)
                     ef.registrar_log(e["doc"], e["nome"], e["email"], "ENVIADO")
                     self.fila.put(("status", e["doc"], "Enviado", "enviado"))
                     self.fila.put(("log", f"[ENVIADO] {e['nome']} -> {e['email']}"))
-                    ok += 1
+                    enviados.append(e)
                 except Exception as erro:
                     ef.registrar_log(e["doc"], e["nome"], e["email"], f"ERRO: {erro}")
                     self.fila.put(("status", e["doc"], "Erro", "erro"))
                     self.fila.put(("log", f"[ERRO] {e['nome']} -> {e['email']}: {erro}"))
                     falhas += 1
+                    continue
+
+                # com remetente definido, confirma no 1º envio se o servidor aceitou
+                if outlook and remetente and len(enviados) == 1:
+                    self.fila.put(("status", e["doc"], "Verificando...", ""))
+                    self.fila.put(("log", f"Verificando se o servidor aceitou o remetente {remetente}..."))
+                    if self._aguardar_recusas(inicio, [e], ef.ESPERA_RECUSAS):
+                        aviso = (f"O servidor recusou o envio como '{remetente}':\n{e['recusado']}\n\n"
+                                 "Os demais e-mails não foram enviados. Verifique a permissão com a TI "
+                                 "ou deixe o remetente vazio.")
+                        break
+                    self.fila.put(("status", e["doc"], "Enviado", "enviado"))
+
+            restantes = [e for e in enviados if "recusado" not in e]
+            if outlook and restantes and not self.parar.is_set():
+                self.fila.put(("log", f"Aguardando {ef.ESPERA_RECUSAS}s por avisos de não entrega..."))
+                self._aguardar_recusas(inicio, restantes, ef.ESPERA_RECUSAS)
         finally:
             pythoncom.CoUninitialize()
-            self.fila.put(("fim", ok, falhas))
+            recusados = sum(1 for e in enviados if "recusado" in e)
+            self.fila.put(("fim", len(enviados) - recusados, falhas + recusados, aviso))
 
     def processar_fila(self):
         try:
@@ -234,11 +306,16 @@ class App:
                 elif item[0] == "log":
                     self.escrever_log(item[1])
                 elif item[0] == "fim":
-                    _, ok, falhas = item
+                    _, ok, falhas, aviso = item
                     self.enviando = False
                     self.btn_enviar.configure(state="normal")
-                    self.escrever_log(f"Concluído: {ok} enviado(s), {falhas} com erro.")
-                    messagebox.showinfo("Envio concluído", f"{ok} e-mail(s) enviado(s)\n{falhas} com erro")
+                    self.btn_parar.configure(state="disabled")
+                    self.escrever_log(f"Concluído: {ok} enviado(s), {falhas} com erro/recusado.")
+                    resumo = f"{ok} e-mail(s) enviado(s)\n{falhas} com erro ou recusado(s)"
+                    if aviso:
+                        messagebox.showwarning("Envio interrompido", f"{aviso}\n\n{resumo}")
+                    else:
+                        messagebox.showinfo("Envio concluído", resumo)
         except queue.Empty:
             pass
         self.root.after(150, self.processar_fila)

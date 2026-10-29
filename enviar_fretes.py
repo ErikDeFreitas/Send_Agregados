@@ -17,6 +17,7 @@ import re
 import shutil
 import smtplib
 import sys
+import time
 import unicodedata
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
@@ -33,6 +34,7 @@ else:
 PASTA_PREVIA = PASTA / "previas"
 ARQUIVO_LOG = PASTA / "log_envios.csv"
 ARQUIVO_CONFIG = PASTA / "config.ini"
+ESPERA_RECUSAS = 20  # segundos aguardando avisos de não entrega após o envio
 
 
 class ErroPlanilha(Exception):
@@ -250,7 +252,8 @@ CNPJ/CPF: {formatar_documento(doc)} &nbsp;|&nbsp; Quantidade de fretes: {len(fre
 <thead><tr>{cab}</tr></thead>
 <tbody>{''.join(linhas)}{total}</tbody>
 </table>
-<p>Em caso de dúvidas, basta responder este e-mail.</p>
+<p>Este é um e-mail automático. Por favor, não responda.</p>
+<p>Em caso de dúvidas, favor entrar em contato pelo e-mail agregados@tcm.com.br</p>
 <p>Atenciosamente,<br>{assinatura}</p>
 </body></html>"""
 
@@ -338,6 +341,38 @@ def enviar(cfg, envio, remetente="", cc=""):
         enviar_smtp(cfg, envio["email"], envio["assunto"], envio["corpo"], remetente, cc)
 
 
+def buscar_recusas(desde: datetime, assuntos) -> dict:
+    """
+    Procura na Caixa de Entrada do Outlook avisos de não entrega (NDR) recebidos após `desde`
+    para os assuntos informados. O Exchange não devolve erro no Send(); ele recusa depois e
+    avisa por e-mail. Retorna {assunto: motivo}.
+    """
+    import win32com.client
+    ns = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
+    itens = ns.GetDefaultFolder(6).Items
+    itens.Sort("[CreationTime]", True)
+    pendentes = set(assuntos)
+    recusas = {}
+    for item in itens:
+        try:
+            # o Outlook entrega a hora local marcada como UTC; compara sem fuso
+            if item.CreationTime.replace(tzinfo=None) < desde:
+                break
+            if "NDR" not in item.MessageClass.upper():
+                continue
+            assunto_ndr, corpo = item.Subject or "", item.Body or ""
+        except Exception:
+            continue
+        for assunto in list(pendentes):
+            if assunto in assunto_ndr:
+                texto = re.sub(r"\s+", " ", corpo)
+                motivo = re.search(r"(Você não possui permissão[^.]*|You can't send[^.]*|"
+                                   r"não foi possível encontrar[^.]*|[^.]*não existe[^.]*)", texto, re.I)
+                recusas[assunto] = motivo.group(1).strip() if motivo else texto[:200]
+                pendentes.discard(assunto)
+    return recusas
+
+
 def registrar_log(doc, nome, email, status):
     novo = not ARQUIVO_LOG.exists()
     with open(ARQUIVO_LOG, "a", newline="", encoding="utf-8-sig") as f:
@@ -387,6 +422,9 @@ def main():
     PASTA_PREVIA.mkdir(exist_ok=True)
     remetente = cfg["email"].get("enviar_como", "")
     cc = cfg["email"].get("cc", "")
+    intervalo = cfg["email"].getfloat("intervalo_segundos", 5)
+    inicio = datetime.now()
+    enviados = []
     ok = falhas = 0
 
     for e in envios:
@@ -407,15 +445,29 @@ def main():
             registrar_log(e["doc"], e["nome"], "", "SEM E-MAIL")
             falhas += 1
             continue
+        if enviados:
+            time.sleep(intervalo)
         try:
             enviar(cfg, e, remetente, cc)
             print(f"[ENVIADO] {e['nome']} -> {e['email']} | {e['fretes']} frete(s)")
             registrar_log(e["doc"], e["nome"], e["email"], "ENVIADO")
+            enviados.append(e)
             ok += 1
         except Exception as erro:
             print(f"[ERRO] {e['nome']} -> {e['email']}: {erro}")
             registrar_log(e["doc"], e["nome"], e["email"], f"ERRO: {erro}")
             falhas += 1
+
+    if enviados and cfg["email"].get("metodo", "outlook") == "outlook":
+        print(f"\nAguardando {ESPERA_RECUSAS}s por avisos de não entrega do servidor...")
+        time.sleep(ESPERA_RECUSAS)
+        recusas = buscar_recusas(inicio, [e["assunto"] for e in enviados])
+        for e in enviados:
+            if e["assunto"] in recusas:
+                print(f"[RECUSADO] {e['nome']} -> {e['email']}: {recusas[e['assunto']]}")
+                registrar_log(e["doc"], e["nome"], e["email"], f"RECUSADO: {recusas[e['assunto']]}")
+                ok -= 1
+                falhas += 1
 
     acao = "enviado(s)" if args.enviar else f"prévia(s) gerada(s) em {PASTA_PREVIA}"
     print(f"\nConcluído: {ok} {acao}, {falhas} com problema.")
