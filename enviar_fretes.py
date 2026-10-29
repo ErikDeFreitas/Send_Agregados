@@ -343,8 +343,9 @@ def montar_html(cfg, nome, doc, fretes: pd.DataFrame, periodo) -> str:
 <tbody>{''.join(linhas)}{total}</tbody>
 </table>
 </div>
-<p style="{texto};margin-top:20px">Este é um e-mail automático. Por favor, não responda.</p>
-<p style="{texto}">Em caso de dúvidas, favor entrar em contato pelo e-mail agregados@tcm.com.br</p>
+<p style="{texto};margin-top:20px">O comprovante de entrega deverá ser enviado imediatamente após a conclusão do serviço. A ausência desse documento impedirá a liberação do pagamento dos respectivos valores apresentados na prévia, que permanecerão pendentes até a devida regularização.</p>
+<p style="{texto}">Este é um e-mail automático. Por favor, não responda.</p>
+<p style="{texto}">Em caso de dúvidas, favor entrar em contato com seu responsável de atendimento.</p>
 <p style="{texto}">Atenciosamente,<br>{assinatura}</p>
 </td></tr>
 </table>
