@@ -29,9 +29,19 @@ from pathlib import Path
 
 import pandas as pd
 
-# no executável, config, .env e log ficam ao lado do .exe
+# no executável, config, .env e log ficam numa pasta própria (não soltos ao lado do .exe)
+NOME_PASTA_DADOS = "RoboAgregado"
 if getattr(sys, "frozen", False):
-    PASTA = Path(sys.executable).resolve().parent
+    PASTA = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / NOME_PASTA_DADOS
+    PASTA.mkdir(parents=True, exist_ok=True)
+    # versões antigas gravavam estes arquivos ao lado do .exe: leva para a pasta nova
+    for _nome in (".env", "log_envios.csv", "preferencias.json"):
+        _antigo = Path(sys.executable).resolve().parent / _nome
+        if _antigo.is_file() and not (PASTA / _nome).exists():
+            try:
+                shutil.move(str(_antigo), str(PASTA / _nome))
+            except OSError:
+                pass
 else:
     PASTA = Path(__file__).resolve().parent
 PASTA_PREVIA = PASTA / "previas"
@@ -188,22 +198,24 @@ def credenciais_ok() -> bool:
     return bool(os.environ.get("SMTP_USUARIO") and os.environ.get("SMTP_SENHA"))
 
 
-def cc_padrao(cfg) -> str:
-    """CC padrão: informado na janela de credenciais (.env); o config.ini só serve de reserva."""
-    return os.environ.get("EMAIL_CC") or cfg["email"].get("cc", "")
+def cco_padrao(cfg) -> str:
+    """CCO padrão: informado na janela de credenciais (.env); o config.ini só serve de reserva."""
+    return (os.environ.get("EMAIL_CCO") or os.environ.get("EMAIL_CC")
+            or cfg["email"].get("cco", "") or cfg["email"].get("cc", ""))
 
 
-def salvar_env(usuario: str, senha: str, cc: str = ""):
-    """Grava remetente, senha e CC padrão no .env (acesso restrito ao usuário do Windows)."""
+def salvar_env(usuario: str, senha: str, cco: str = ""):
+    """Grava remetente, senha e CCO padrão no .env (acesso restrito ao usuário do Windows)."""
     ARQUIVO_ENV.write_text(
-        f'SMTP_USUARIO="{usuario}"\nSMTP_SENHA="{senha}"\nEMAIL_CC="{cc}"\n', encoding="utf-8")
+        f'SMTP_USUARIO="{usuario}"\nSMTP_SENHA="{senha}"\nEMAIL_CCO="{cco}"\n', encoding="utf-8")
     try:  # remove as permissões herdadas: só o usuário atual lê o arquivo
         subprocess.run(["icacls", str(ARQUIVO_ENV), "/inheritance:r", "/grant:r",
                         f"{os.environ.get('USERNAME', '')}:F"],
                        capture_output=True, timeout=15, creationflags=0x08000000)
     except (OSError, subprocess.SubprocessError):
         pass
-    os.environ["SMTP_USUARIO"], os.environ["SMTP_SENHA"], os.environ["EMAIL_CC"] = usuario, senha, cc
+    os.environ["SMTP_USUARIO"], os.environ["SMTP_SENHA"], os.environ["EMAIL_CCO"] = usuario, senha, cco
+    os.environ.pop("EMAIL_CC", None)
 
 
 def conectar_smtp(cfg, usuario: str, senha: str):
@@ -439,13 +451,13 @@ def preparar_envios(cfg, df, emails, docs=None, periodo_fixo="") -> list[dict]:
     return envios
 
 
-def enviar_outlook(para, assunto, corpo, remetente="", cc=""):
+def enviar_outlook(para, assunto, corpo, remetente="", cco=""):
     import win32com.client  # pywin32
     outlook = win32com.client.Dispatch("Outlook.Application")
     msg = outlook.CreateItem(0)
     msg.To = para
-    if cc:
-        msg.CC = cc
+    if cco:
+        msg.BCC = cco
     if remetente:
         msg.SentOnBehalfOfName = remetente
         # guarda a cópia em "Itens Enviados" da caixa compartilhada, se houver acesso
@@ -481,7 +493,7 @@ class Enviador:
     """
     Envia os e-mails de um lote pelo método do config.ini (smtp ou outlook).
     No SMTP, abre UMA conexão segura (STARTTLS com certificado verificado) para o lote todo.
-    Uso:  with Enviador(cfg) as env: env.enviar(envio, remetente, cc)
+    Uso:  with Enviador(cfg) as env: env.enviar(envio, remetente, cco)
     """
 
     def __init__(self, cfg):
@@ -511,11 +523,11 @@ class Enviador:
             raise ErroFatal("Credenciais SMTP não informadas. Use o botão 'Credenciais...' da tela.")
         self.conexao = conectar_smtp(self.cfg, usuario, senha)
 
-    def enviar(self, envio, remetente="", cc=""):
+    def enviar(self, envio, remetente="", cco=""):
         para = list(dict.fromkeys(separar_emails(envio["email"])))
         ja = {e.lower() for e in para}
-        copia = [e for e in dict.fromkeys(separar_emails(cc)) if e.lower() not in ja]
-        invalidos = emails_invalidos(envio["email"]) + emails_invalidos(cc)
+        oculta = [e for e in dict.fromkeys(separar_emails(cco)) if e.lower() not in ja]
+        invalidos = emails_invalidos(envio["email"]) + emails_invalidos(cco)
         if not para:
             raise ErroEnvio("Destinatário sem e-mail cadastrado.")
         if invalidos:
@@ -524,7 +536,7 @@ class Enviador:
 
         if self.metodo == "outlook":
             try:
-                enviar_outlook("; ".join(para), assunto, envio["corpo"], remetente, "; ".join(copia))
+                enviar_outlook("; ".join(para), assunto, envio["corpo"], remetente, "; ".join(oculta))
             except Exception as e:
                 raise ErroEnvio(f"Falha ao enviar pelo Outlook ({type(e).__name__}).") from None
             return
@@ -536,8 +548,6 @@ class Enviador:
         nome_rem = limpar_cabecalho(self.cfg["smtp"].get("nome_remetente", ""))
         msg["From"] = formataddr((nome_rem, remetente)) if nome_rem else remetente
         msg["To"] = ", ".join(para)
-        if copia:
-            msg["Cc"] = ", ".join(copia)
         msg["Subject"] = assunto
         msg.set_content(html_para_texto(envio["corpo"]))
         msg.add_alternative(envio["corpo"], subtype="html")
@@ -546,7 +556,7 @@ class Enviador:
             if self.conexao is None:
                 self._conectar()
             try:
-                self.conexao.send_message(msg, from_addr=remetente, to_addrs=para + copia)
+                self.conexao.send_message(msg, from_addr=remetente, to_addrs=para + oculta)  # CCO: só no envelope, nunca nos cabeçalhos
                 return
             except smtplib.SMTPServerDisconnected:
                 self.conexao = None  # servidor encerrou a sessão: reconecta uma vez
@@ -682,7 +692,7 @@ def main():
 
     PASTA_PREVIA.mkdir(exist_ok=True)
     remetente = cfg["email"].get("enviar_como", "")
-    cc = cc_padrao(cfg)
+    cco = cco_padrao(cfg)
     intervalo = cfg["email"].getfloat("intervalo_segundos", 5)
     anteriores = envios_anteriores()
     inicio = datetime.now()
@@ -716,7 +726,7 @@ def main():
             if enviados:
                 time.sleep(intervalo)
             try:
-                enviador.enviar(e, remetente, cc)
+                enviador.enviar(e, remetente, cco)
                 print(f"[ENVIADO] {e['nome']} -> {e['email']} | {e['fretes']} frete(s)")
                 registrar_log(e["doc"], e["nome"], e["email"], "ENVIADO", e["assunto"])
                 enviados.append(e)

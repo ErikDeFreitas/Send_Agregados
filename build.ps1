@@ -1,7 +1,7 @@
 # Gera o executavel e o arquivo .sha256 que acompanham cada Release no GitHub.
 # Antes: aumente VERSAO em versao.py. Uso:  powershell -File build.ps1
 Set-Location $PSScriptRoot
-$nome = "Extrato Fretes Agregados"
+$nome = "RoboAgregado"
 $exe = "dist\$nome.exe"
 $antes = if (Test-Path $exe) { (Get-Item $exe).LastWriteTime } else { [datetime]::MinValue }
 

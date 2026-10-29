@@ -59,10 +59,10 @@ class DialogoCredenciais(tk.Toplevel):
         self.var_senha = tk.StringVar()
         self.campo_senha = ttk.Entry(corpo, textvariable=self.var_senha, show="*", width=38)
         self.campo_senha.grid(row=2, column=1, padx=(8, 0))
-        ttk.Label(corpo, text="CC padrão:").grid(row=3, column=0, sticky="w", pady=3)
-        self.var_cc = tk.StringVar(value=ef.cc_padrao(cfg))
-        ttk.Entry(corpo, textvariable=self.var_cc, width=38).grid(row=3, column=1, padx=(8, 0))
-        ttk.Label(corpo, text="opcional; vários endereços separados por ;", foreground="gray").grid(
+        ttk.Label(corpo, text="CCO padrão:").grid(row=3, column=0, sticky="w", pady=3)
+        self.var_cco = tk.StringVar(value=ef.cco_padrao(cfg))
+        ttk.Entry(corpo, textvariable=self.var_cco, width=38).grid(row=3, column=1, padx=(8, 0))
+        ttk.Label(corpo, text="cópia oculta, opcional; vários separados por ;", foreground="gray").grid(
             row=4, column=1, sticky="w", padx=(8, 0))
         self.var_msg = tk.StringVar()
         ttk.Label(corpo, textvariable=self.var_msg, foreground="#b00020", wraplength=330,
@@ -81,15 +81,15 @@ class DialogoCredenciais(tk.Toplevel):
 
     def salvar(self):
         usuario, senha = self.var_usuario.get().strip(), self.var_senha.get()
-        cc = self.var_cc.get().strip()
+        cco = self.var_cco.get().strip()
         if ef.emails_invalidos(usuario) or not usuario:
             self.var_msg.set("Informe um e-mail válido.")
             return
         if not senha:
             self.var_msg.set("Informe a senha.")
             return
-        if ef.emails_invalidos(cc):
-            self.var_msg.set(f"CC inválido: {', '.join(ef.emails_invalidos(cc))}")
+        if ef.emails_invalidos(cco):
+            self.var_msg.set(f"CCO inválido: {', '.join(ef.emails_invalidos(cco))}")
             return
         self.var_msg.set("Testando o login no servidor...")
         self.btn_salvar.configure(state="disabled")
@@ -101,10 +101,10 @@ class DialogoCredenciais(tk.Toplevel):
             self.btn_salvar.configure(state="normal")
             return
         try:
-            ef.salvar_env(usuario, senha, cc)
+            ef.salvar_env(usuario, senha, cco)
         except OSError:
             self.var_msg.set("Não foi possível gravar o arquivo .env nesta pasta. "
-                             "Mova o programa para uma pasta com permissão de escrita.")
+                             "Verifique a permissão de escrita na pasta de dados do programa.")
             self.btn_salvar.configure(state="normal")
             return
         self.salvo = True
@@ -121,7 +121,7 @@ class App:
         self.enviando = False
         self.parar = threading.Event()
 
-        root.title(f"Extrato de Fretes - Agregados (v{VERSAO})")
+        root.title(f"RoboAgregado - Extrato de Fretes (v{VERSAO})")
         root.geometry("980x620")
         root.minsize(800, 500)
 
@@ -136,32 +136,24 @@ class App:
         ttk.Button(topo, text="Selecionar planilha...", command=self.selecionar_planilha).grid(
             row=0, column=2, sticky="ew")
 
-        # preferências separadas por método, para valores do Outlook não valerem no SMTP
+        # o remetente vem das credenciais (.env); só o método Outlook usa o enviar_como do config.ini
         self.metodo = self.cfg["email"].get("metodo", "outlook").strip().lower()
-        self.chave_rem, self.chave_cc = f"remetente_{self.metodo}", f"cc_{self.metodo}"
-        padrao = ef.remetente_padrao(self.cfg)
+        self.chave_cco = f"cco_{self.metodo}"
 
-        ttk.Label(topo, text="Remetente:").grid(row=1, column=0, sticky="w", pady=3)
-        self.var_remetente = tk.StringVar(
-            value=self.prefs.get(self.chave_rem, self.cfg["email"].get("enviar_como", "")))
-        ttk.Entry(topo, textvariable=self.var_remetente).grid(row=1, column=1, sticky="ew", padx=5)
-        dica = f"vazio = {padrao}" if padrao else "vazio = e-mail logado no Outlook"
-        ttk.Label(topo, text=dica, foreground="gray").grid(row=1, column=2, sticky="w")
-
-        ttk.Label(topo, text="Cópia (CC):").grid(row=2, column=0, sticky="w", pady=3)
-        self.var_cc = tk.StringVar(
-            value=self.prefs.get(self.chave_cc, ef.cc_padrao(self.cfg)))
-        ttk.Entry(topo, textvariable=self.var_cc).grid(row=2, column=1, sticky="ew", padx=5)
+        ttk.Label(topo, text="Cópia oculta (CCO):").grid(row=1, column=0, sticky="w", pady=3)
+        self.var_cco = tk.StringVar(
+            value=self.prefs.get(self.chave_cco, ef.cco_padrao(self.cfg)))
+        ttk.Entry(topo, textvariable=self.var_cco).grid(row=1, column=1, sticky="ew", padx=5)
         ttk.Label(topo, text="separe vários com ;", foreground="gray").grid(
-            row=2, column=2, sticky="w")
+            row=1, column=2, sticky="w")
 
-        ttk.Label(topo, text="Intervalo (s):").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Label(topo, text="Intervalo (s):").grid(row=2, column=0, sticky="w", pady=3)
         self.var_intervalo = tk.StringVar(value=str(
             self.prefs.get("intervalo", self.cfg["email"].get("intervalo_segundos", "5"))))
         ttk.Spinbox(topo, from_=0, to=300, width=6, textvariable=self.var_intervalo).grid(
-            row=3, column=1, sticky="w", padx=5)
+            row=2, column=1, sticky="w", padx=5)
         ttk.Label(topo, text="espera entre um envio e outro", foreground="gray").grid(
-            row=3, column=2, sticky="w")
+            row=2, column=2, sticky="w")
 
         meio = ttk.Frame(root, padding=(10, 0))
         meio.pack(fill="both", expand=True)
@@ -190,6 +182,8 @@ class App:
         if self.metodo == "smtp":
             ttk.Button(botoes, text="Credenciais...", command=self.pedir_credenciais).pack(
                 side="left", padx=5)
+        ttk.Button(botoes, text="Pasta de dados", command=lambda: os.startfile(ef.PASTA)).pack(
+            side="left")
         self.btn_enviar = ttk.Button(botoes, text="Enviar selecionados", command=self.enviar_selecionados)
         self.btn_enviar.pack(side="right")
         self.btn_parar = ttk.Button(botoes, text="Parar", state="disabled", command=self.parar_envio)
@@ -256,7 +250,7 @@ class App:
         dialogo = DialogoCredenciais(self.root, self.cfg)
         self.root.wait_window(dialogo)
         if dialogo.salvo:
-            self.var_cc.set(os.environ.get("EMAIL_CC", ""))
+            self.var_cco.set(os.environ.get("EMAIL_CCO", ""))
             self.escrever_log(f"Credenciais salvas para {os.environ.get('SMTP_USUARIO')}.")
         return dialogo.salvo
 
@@ -317,11 +311,11 @@ class App:
             messagebox.showinfo("Visualizar", "Selecione um agregado na lista.")
             return
         e = self.envios[sel[0]]
-        cc = self.var_cc.get().strip()
+        cco = self.var_cco.get().strip()
         cabecalho = (f'<div style="font-family:Segoe UI,Arial;font-size:13px;background:#f4f4f4;'
                      f'padding:10px;margin-bottom:15px;border:1px solid #ddd">'
                      f'<b>Para:</b> {html.escape(e["email"] or "SEM E-MAIL")}<br>'
-                     f'<b>CC:</b> {html.escape(cc or "-")}<br>'
+                     f'<b>CCO:</b> {html.escape(cco or "-")}<br>'
                      f'<b>Assunto:</b> {html.escape(e["assunto"])}</div>')
         # cabeçalho só na prévia, logo após a tag <body ...>
         corpo = e["corpo"]
@@ -345,8 +339,8 @@ class App:
             messagebox.showwarning("Enviar", "Nenhum dos selecionados tem e-mail cadastrado.")
             return
 
-        remetente = self.var_remetente.get().strip()
-        cc = self.var_cc.get().strip()
+        remetente = self.cfg["email"].get("enviar_como", "").strip() if self.metodo == "outlook" else ""
+        cco = self.var_cco.get().strip()
         try:
             intervalo = max(0.0, float(self.var_intervalo.get().replace(",", ".")))
         except ValueError:
@@ -354,10 +348,10 @@ class App:
             return
 
         # validação dos endereços antes de enviar qualquer coisa
-        problemas = ef.emails_invalidos(remetente) + ef.emails_invalidos(cc)
+        problemas = ef.emails_invalidos(remetente) + ef.emails_invalidos(cco)
         if problemas:
             messagebox.showwarning("E-mail inválido",
-                                   "Corrija o remetente/CC:\n" + "\n".join(problemas))
+                                   "Corrija o remetente/CCO:\n" + "\n".join(problemas))
             return
         invalidos = [e for e in validos if ef.emails_invalidos(e["email"])]
         if invalidos:
@@ -393,7 +387,7 @@ class App:
         rotulo_rem = remetente or ef.remetente_padrao(self.cfg) or "e-mail logado no Outlook"
         texto = (f"Enviar {len(validos)} e-mail(s)?\n\n"
                  f"Remetente: {rotulo_rem}\n"
-                 f"Cópia (CC): {cc or '-'}\n"
+                 f"Cópia oculta (CCO): {cco or '-'}\n"
                  f"Intervalo entre envios: {intervalo:g} s")
         if sem_email:
             texto += f"\n\n{len(sem_email)} selecionado(s) sem e-mail serão ignorados."
@@ -403,14 +397,14 @@ class App:
         if not messagebox.askyesno("Confirmar envio", texto):
             return
 
-        self.prefs.update({self.chave_rem: remetente, self.chave_cc: cc, "intervalo": f"{intervalo:g}"})
+        self.prefs.update({self.chave_cco: cco, "intervalo": f"{intervalo:g}"})
         salvar_prefs(self.prefs)
         self.enviando = True
         self.parar.clear()
         self.btn_enviar.configure(state="disabled")
         self.btn_parar.configure(state="normal")
         envios = [dict(e) for e in validos]  # cópia: marcações de recusa não afetam a lista
-        threading.Thread(target=self._enviar_thread, args=(envios, remetente, cc, intervalo),
+        threading.Thread(target=self._enviar_thread, args=(envios, remetente, cco, intervalo),
                          daemon=True).start()
 
     def parar_envio(self):
@@ -437,7 +431,7 @@ class App:
                 achou = True
         return achou
 
-    def _enviar_thread(self, envios, remetente, cc, intervalo):
+    def _enviar_thread(self, envios, remetente, cco, intervalo):
         outlook = self.metodo == "outlook"
         if outlook:
             import pythoncom  # o Outlook (COM) precisa ser inicializado em cada thread
@@ -452,7 +446,7 @@ class App:
                     break
                 self.fila.put(("status", e["doc"], "Enviando...", ""))
                 try:
-                    enviador.enviar(e, remetente, cc)
+                    enviador.enviar(e, remetente, cco)
                     ef.registrar_log(e["doc"], e["nome"], e["email"], "ENVIADO", e["assunto"])
                     self.fila.put(("status", e["doc"], "Enviado", "enviado"))
                     self.fila.put(("log", f"[ENVIADO] {e['nome']} -> {e['email']}"))
@@ -476,7 +470,7 @@ class App:
                     if self._aguardar_recusas(inicio, [e], ef.ESPERA_RECUSAS):
                         aviso = (f"O servidor recusou o envio como '{remetente}':\n{e['recusado']}\n\n"
                                  "Os demais e-mails não foram enviados. Verifique a permissão com a TI "
-                                 "ou deixe o remetente vazio.")
+                                 "ou revise o método de envio.")
                         break
                     self.fila.put(("status", e["doc"], "Enviado", "enviado"))
 

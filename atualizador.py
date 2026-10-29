@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 from versao import VERSAO
 
 API = "https://api.github.com"
-NOME_EXE = "Extrato Fretes Agregados.exe"
+NOME_EXE = "RoboAgregado.exe"
 # download só de hosts do próprio GitHub (inclusive após redirecionamentos)
 HOSTS_PERMITIDOS = ("api.github.com", "github.com", "objects.githubusercontent.com",
                     "release-assets.githubusercontent.com", "github-releases.githubusercontent.com")
