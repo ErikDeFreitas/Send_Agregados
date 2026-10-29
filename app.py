@@ -4,6 +4,7 @@ import html
 import json
 import os
 import queue
+import sys
 import tempfile
 import threading
 import time
@@ -13,7 +14,9 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+import atualizador
 import enviar_fretes as ef
+from versao import VERSAO
 
 ARQUIVO_PREFS = ef.PASTA / "preferencias.json"
 
@@ -45,39 +48,48 @@ class DialogoCredenciais(tk.Toplevel):
         corpo = ttk.Frame(self, padding=15)
         corpo.pack(fill="both", expand=True)
         corpo.columnconfigure(1, weight=1)
-        ttk.Label(corpo, text="Informe o e-mail e a senha da conta que enviará os extratos.\n"
+        ttk.Label(corpo, text="Informe o e-mail remetente e a senha da conta que enviará os extratos.\n"
                               "Os dados ficam salvos só neste computador (arquivo .env).",
                   justify="left").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
         ttk.Label(corpo, text="E-mail:").grid(row=1, column=0, sticky="w", pady=3)
-        self.var_usuario = tk.StringVar(value=os.environ.get("SMTP_USUARIO")
-                                        or cfg["smtp"].get("remetente", ""))
-        ttk.Entry(corpo, textvariable=self.var_usuario, width=38).grid(row=1, column=1, padx=(8, 0))
+        self.var_usuario = tk.StringVar(value=os.environ.get("SMTP_USUARIO", ""))
+        self.campo_usuario = ttk.Entry(corpo, textvariable=self.var_usuario, width=38)
+        self.campo_usuario.grid(row=1, column=1, padx=(8, 0))
         ttk.Label(corpo, text="Senha:").grid(row=2, column=0, sticky="w", pady=3)
         self.var_senha = tk.StringVar()
         self.campo_senha = ttk.Entry(corpo, textvariable=self.var_senha, show="*", width=38)
         self.campo_senha.grid(row=2, column=1, padx=(8, 0))
+        ttk.Label(corpo, text="CC padrão:").grid(row=3, column=0, sticky="w", pady=3)
+        self.var_cc = tk.StringVar(value=ef.cc_padrao(cfg))
+        ttk.Entry(corpo, textvariable=self.var_cc, width=38).grid(row=3, column=1, padx=(8, 0))
+        ttk.Label(corpo, text="opcional; vários endereços separados por ;", foreground="gray").grid(
+            row=4, column=1, sticky="w", padx=(8, 0))
         self.var_msg = tk.StringVar()
         ttk.Label(corpo, textvariable=self.var_msg, foreground="#b00020", wraplength=330,
-                  justify="left").grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+                  justify="left").grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         botoes = ttk.Frame(corpo)
-        botoes.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        botoes.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
         self.btn_salvar = ttk.Button(botoes, text="Testar e salvar", command=self.salvar)
         self.btn_salvar.pack(side="left", padx=5)
         ttk.Button(botoes, text="Cancelar", command=self.destroy).pack(side="left")
 
         self.bind("<Return>", lambda _: self.salvar())
         self.bind("<Escape>", lambda _: self.destroy())
-        self.campo_senha.focus_set()
+        (self.campo_senha if self.var_usuario.get() else self.campo_usuario).focus_set()
         self.grab_set()
 
     def salvar(self):
         usuario, senha = self.var_usuario.get().strip(), self.var_senha.get()
+        cc = self.var_cc.get().strip()
         if ef.emails_invalidos(usuario) or not usuario:
             self.var_msg.set("Informe um e-mail válido.")
             return
         if not senha:
             self.var_msg.set("Informe a senha.")
+            return
+        if ef.emails_invalidos(cc):
+            self.var_msg.set(f"CC inválido: {', '.join(ef.emails_invalidos(cc))}")
             return
         self.var_msg.set("Testando o login no servidor...")
         self.btn_salvar.configure(state="disabled")
@@ -89,7 +101,7 @@ class DialogoCredenciais(tk.Toplevel):
             self.btn_salvar.configure(state="normal")
             return
         try:
-            ef.salvar_env(usuario, senha)
+            ef.salvar_env(usuario, senha, cc)
         except OSError:
             self.var_msg.set("Não foi possível gravar o arquivo .env nesta pasta. "
                              "Mova o programa para uma pasta com permissão de escrita.")
@@ -109,7 +121,7 @@ class App:
         self.enviando = False
         self.parar = threading.Event()
 
-        root.title("Extrato de Fretes - Agregados")
+        root.title(f"Extrato de Fretes - Agregados (v{VERSAO})")
         root.geometry("980x620")
         root.minsize(800, 500)
 
@@ -138,7 +150,7 @@ class App:
 
         ttk.Label(topo, text="Cópia (CC):").grid(row=2, column=0, sticky="w", pady=3)
         self.var_cc = tk.StringVar(
-            value=self.prefs.get(self.chave_cc, self.cfg["email"].get("cc", "")))
+            value=self.prefs.get(self.chave_cc, ef.cc_padrao(self.cfg)))
         ttk.Entry(topo, textvariable=self.var_cc).grid(row=2, column=1, sticky="ew", padx=5)
         ttk.Label(topo, text="separe vários com ;", foreground="gray").grid(
             row=2, column=2, sticky="w")
@@ -191,6 +203,52 @@ class App:
         self.root.after(150, self.processar_fila)
         if self.metodo == "smtp" and not ef.credenciais_ok():
             self.root.after(300, self.pedir_credenciais)  # primeira execução
+        self.root.after(1000, self.verificar_atualizacao)
+
+    # -------------------------------------------------------------- atualização
+
+    def verificar_atualizacao(self):
+        """Ao abrir, procura uma Release mais nova no GitHub (só no executável, em segundo plano)."""
+        if not getattr(sys, "frozen", False):
+            return
+        cfg = self.cfg["atualizacao"] if self.cfg.has_section("atualizacao") else {}
+        if str(cfg.get("ativo", "sim")).strip().lower() not in ("sim", "s", "true", "1"):
+            return
+        atualizador.limpar_temporarios()
+        repositorio = str(cfg.get("repositorio", "ErikDeFreitas/Send_Agregados")).strip()
+        threading.Thread(target=self._atualizar_thread, args=(repositorio,), daemon=True).start()
+
+    def _atualizar_thread(self, repositorio):
+        try:
+            info = atualizador.buscar_atualizacao(repositorio)
+            if not info:
+                return
+            self.fila.put(("log", f"Nova versão {info['versao']} encontrada. Baixando..."))
+            novo = Path(sys.executable)
+            novo = novo.with_name(novo.name + ".novo")
+            atualizador.baixar_e_verificar(info, novo)
+            self.fila.put(("atualizar", info["versao"], str(novo)))
+        except atualizador.ErroAtualizacao as e:
+            self.fila.put(("log", f"Atualização automática não realizada: {e}"))
+        except Exception as e:
+            self.fila.put(("log", f"Atualização automática não realizada ({type(e).__name__})."))
+
+    def _aplicar_atualizacao(self, versao, caminho):
+        novo = Path(caminho)
+        if self.enviando:  # nunca troca o programa no meio de um envio
+            novo.unlink(missing_ok=True)
+            self.escrever_log("Atualização adiada: há um envio em andamento. Será tentada na próxima abertura.")
+            return
+        messagebox.showinfo("Atualização", f"Nova versão {versao} instalada.\n"
+                                           "O programa será reiniciado agora.")
+        try:
+            atualizador.aplicar_e_reiniciar(novo)
+        except atualizador.ErroAtualizacao as e:
+            novo.unlink(missing_ok=True)
+            messagebox.showwarning("Atualização", f"{e}\nO programa continuará na versão atual.")
+            return
+        self.root.destroy()
+        os._exit(0)
 
     # -------------------------------------------------------------- ações
 
@@ -198,6 +256,7 @@ class App:
         dialogo = DialogoCredenciais(self.root, self.cfg)
         self.root.wait_window(dialogo)
         if dialogo.salvo:
+            self.var_cc.set(os.environ.get("EMAIL_CC", ""))
             self.escrever_log(f"Credenciais salvas para {os.environ.get('SMTP_USUARIO')}.")
         return dialogo.salvo
 
@@ -442,6 +501,8 @@ class App:
                     self.tree.item(doc, tags=(tag,))
                 elif item[0] == "log":
                     self.escrever_log(item[1])
+                elif item[0] == "atualizar":
+                    self._aplicar_atualizacao(item[1], item[2])
                 elif item[0] == "fim":
                     _, ok, falhas, aviso = item
                     self.enviando = False

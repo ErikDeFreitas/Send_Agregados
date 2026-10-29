@@ -188,16 +188,22 @@ def credenciais_ok() -> bool:
     return bool(os.environ.get("SMTP_USUARIO") and os.environ.get("SMTP_SENHA"))
 
 
-def salvar_env(usuario: str, senha: str):
-    """Grava as credenciais no .env (acesso restrito ao usuário do Windows) e as ativa."""
-    ARQUIVO_ENV.write_text(f'SMTP_USUARIO="{usuario}"\nSMTP_SENHA="{senha}"\n', encoding="utf-8")
+def cc_padrao(cfg) -> str:
+    """CC padrão: informado na janela de credenciais (.env); o config.ini só serve de reserva."""
+    return os.environ.get("EMAIL_CC") or cfg["email"].get("cc", "")
+
+
+def salvar_env(usuario: str, senha: str, cc: str = ""):
+    """Grava remetente, senha e CC padrão no .env (acesso restrito ao usuário do Windows)."""
+    ARQUIVO_ENV.write_text(
+        f'SMTP_USUARIO="{usuario}"\nSMTP_SENHA="{senha}"\nEMAIL_CC="{cc}"\n', encoding="utf-8")
     try:  # remove as permissões herdadas: só o usuário atual lê o arquivo
         subprocess.run(["icacls", str(ARQUIVO_ENV), "/inheritance:r", "/grant:r",
                         f"{os.environ.get('USERNAME', '')}:F"],
                        capture_output=True, timeout=15, creationflags=0x08000000)
     except (OSError, subprocess.SubprocessError):
         pass
-    os.environ["SMTP_USUARIO"], os.environ["SMTP_SENHA"] = usuario, senha
+    os.environ["SMTP_USUARIO"], os.environ["SMTP_SENHA"], os.environ["EMAIL_CC"] = usuario, senha, cc
 
 
 def conectar_smtp(cfg, usuario: str, senha: str):
@@ -468,8 +474,7 @@ def remetente_padrao(cfg) -> str:
     """Remetente usado quando o campo fica vazio."""
     if cfg["email"].get("metodo", "outlook") == "outlook":
         return ""  # e-mail logado no Outlook
-    return (cfg["smtp"].get("remetente") or os.environ.get("SMTP_USUARIO")
-            or cfg["smtp"].get("usuario", ""))
+    return os.environ.get("SMTP_USUARIO") or cfg["smtp"].get("remetente", "")
 
 
 class Enviador:
@@ -677,7 +682,7 @@ def main():
 
     PASTA_PREVIA.mkdir(exist_ok=True)
     remetente = cfg["email"].get("enviar_como", "")
-    cc = cfg["email"].get("cc", "")
+    cc = cc_padrao(cfg)
     intervalo = cfg["email"].getfloat("intervalo_segundos", 5)
     anteriores = envios_anteriores()
     inicio = datetime.now()
