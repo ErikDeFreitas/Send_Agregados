@@ -18,6 +18,7 @@ import re
 import shutil
 import smtplib
 import ssl
+import subprocess
 import sys
 import time
 import unicodedata
@@ -181,6 +182,51 @@ def carregar_env(caminho=None):
         if len(valor) >= 2 and valor[0] == valor[-1] and valor[0] in "\"'":
             valor = valor[1:-1]
         os.environ.setdefault(chave.strip(), valor)
+
+
+def credenciais_ok() -> bool:
+    return bool(os.environ.get("SMTP_USUARIO") and os.environ.get("SMTP_SENHA"))
+
+
+def salvar_env(usuario: str, senha: str):
+    """Grava as credenciais no .env (acesso restrito ao usuário do Windows) e as ativa."""
+    ARQUIVO_ENV.write_text(f'SMTP_USUARIO="{usuario}"\nSMTP_SENHA="{senha}"\n', encoding="utf-8")
+    try:  # remove as permissões herdadas: só o usuário atual lê o arquivo
+        subprocess.run(["icacls", str(ARQUIVO_ENV), "/inheritance:r", "/grant:r",
+                        f"{os.environ.get('USERNAME', '')}:F"],
+                       capture_output=True, timeout=15, creationflags=0x08000000)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    os.environ["SMTP_USUARIO"], os.environ["SMTP_SENHA"] = usuario, senha
+
+
+def conectar_smtp(cfg, usuario: str, senha: str):
+    """Abre conexão segura (STARTTLS com certificado verificado) e autentica."""
+    s = cfg["smtp"]
+    try:
+        conexao = smtplib.SMTP(s.get("servidor", "smtp.office365.com"), s.getint("porta", 587),
+                               timeout=30)
+        conexao.ehlo()
+        conexao.starttls(context=ssl.create_default_context())
+        conexao.ehlo()
+        conexao.login(usuario, senha)
+        return conexao
+    except smtplib.SMTPAuthenticationError:
+        raise ErroFatal("Falha de autenticação no SMTP: usuário/senha incorretos ou envio SMTP "
+                        "desabilitado para a conta.") from None
+    except ssl.SSLError:
+        raise ErroFatal("Falha na conexão segura (TLS) com o servidor SMTP.") from None
+    except (OSError, smtplib.SMTPException) as e:
+        raise ErroFatal(f"Não foi possível conectar ao servidor SMTP ({type(e).__name__}).") from None
+
+
+def testar_login(cfg, usuario: str, senha: str):
+    """Valida usuário e senha no servidor, sem enviar nenhuma mensagem."""
+    conexao = conectar_smtp(cfg, usuario, senha)
+    try:
+        conexao.quit()
+    except Exception:
+        pass
 
 
 def carregar_config(caminho=None) -> configparser.ConfigParser:
@@ -457,23 +503,8 @@ class Enviador:
         usuario = os.environ.get("SMTP_USUARIO") or s.get("usuario", "")
         senha = os.environ.get("SMTP_SENHA", "")
         if not usuario or not senha:
-            raise ErroFatal("Credenciais SMTP não encontradas. Verifique SMTP_USUARIO e SMTP_SENHA "
-                            f"no arquivo .env ({ARQUIVO_ENV.parent}).")
-        try:
-            conexao = smtplib.SMTP(s.get("servidor", "smtp.office365.com"), s.getint("porta", 587),
-                                   timeout=30)
-            conexao.ehlo()
-            conexao.starttls(context=ssl.create_default_context())
-            conexao.ehlo()
-            conexao.login(usuario, senha)
-        except smtplib.SMTPAuthenticationError:
-            raise ErroFatal("Falha de autenticação no SMTP: usuário/senha incorretos ou envio SMTP "
-                            "desabilitado para a conta.") from None
-        except ssl.SSLError:
-            raise ErroFatal("Falha na conexão segura (TLS) com o servidor SMTP.") from None
-        except (OSError, smtplib.SMTPException) as e:
-            raise ErroFatal(f"Não foi possível conectar ao servidor SMTP ({type(e).__name__}).") from None
-        self.conexao = conexao
+            raise ErroFatal("Credenciais SMTP não informadas. Use o botão 'Credenciais...' da tela.")
+        self.conexao = conectar_smtp(self.cfg, usuario, senha)
 
     def enviar(self, envio, remetente="", cc=""):
         para = list(dict.fromkeys(separar_emails(envio["email"])))

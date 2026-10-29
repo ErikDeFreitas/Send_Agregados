@@ -2,6 +2,7 @@
 
 import html
 import json
+import os
 import queue
 import tempfile
 import threading
@@ -29,6 +30,73 @@ def salvar_prefs(prefs: dict):
         ARQUIVO_PREFS.write_text(json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
         pass
+
+
+class DialogoCredenciais(tk.Toplevel):
+    """Pede usuário e senha do remetente, testa o login e grava no .env."""
+
+    def __init__(self, pai, cfg):
+        super().__init__(pai)
+        self.cfg, self.salvo = cfg, False
+        self.title("Credenciais do remetente")
+        self.resizable(False, False)
+        self.transient(pai)
+
+        corpo = ttk.Frame(self, padding=15)
+        corpo.pack(fill="both", expand=True)
+        corpo.columnconfigure(1, weight=1)
+        ttk.Label(corpo, text="Informe o e-mail e a senha da conta que enviará os extratos.\n"
+                              "Os dados ficam salvos só neste computador (arquivo .env).",
+                  justify="left").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ttk.Label(corpo, text="E-mail:").grid(row=1, column=0, sticky="w", pady=3)
+        self.var_usuario = tk.StringVar(value=os.environ.get("SMTP_USUARIO")
+                                        or cfg["smtp"].get("remetente", ""))
+        ttk.Entry(corpo, textvariable=self.var_usuario, width=38).grid(row=1, column=1, padx=(8, 0))
+        ttk.Label(corpo, text="Senha:").grid(row=2, column=0, sticky="w", pady=3)
+        self.var_senha = tk.StringVar()
+        self.campo_senha = ttk.Entry(corpo, textvariable=self.var_senha, show="*", width=38)
+        self.campo_senha.grid(row=2, column=1, padx=(8, 0))
+        self.var_msg = tk.StringVar()
+        ttk.Label(corpo, textvariable=self.var_msg, foreground="#b00020", wraplength=330,
+                  justify="left").grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        botoes = ttk.Frame(corpo)
+        botoes.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        self.btn_salvar = ttk.Button(botoes, text="Testar e salvar", command=self.salvar)
+        self.btn_salvar.pack(side="left", padx=5)
+        ttk.Button(botoes, text="Cancelar", command=self.destroy).pack(side="left")
+
+        self.bind("<Return>", lambda _: self.salvar())
+        self.bind("<Escape>", lambda _: self.destroy())
+        self.campo_senha.focus_set()
+        self.grab_set()
+
+    def salvar(self):
+        usuario, senha = self.var_usuario.get().strip(), self.var_senha.get()
+        if ef.emails_invalidos(usuario) or not usuario:
+            self.var_msg.set("Informe um e-mail válido.")
+            return
+        if not senha:
+            self.var_msg.set("Informe a senha.")
+            return
+        self.var_msg.set("Testando o login no servidor...")
+        self.btn_salvar.configure(state="disabled")
+        self.update_idletasks()
+        try:
+            ef.testar_login(self.cfg, usuario, senha)
+        except ef.ErroEnvio as e:
+            self.var_msg.set(str(e))
+            self.btn_salvar.configure(state="normal")
+            return
+        try:
+            ef.salvar_env(usuario, senha)
+        except OSError:
+            self.var_msg.set("Não foi possível gravar o arquivo .env nesta pasta. "
+                             "Mova o programa para uma pasta com permissão de escrita.")
+            self.btn_salvar.configure(state="normal")
+            return
+        self.salvo = True
+        self.destroy()
 
 
 class App:
@@ -107,6 +175,9 @@ class App:
         ttk.Button(botoes, text="Selecionar todos",
                    command=lambda: self.tree.selection_set(self.tree.get_children())).pack(side="left")
         ttk.Button(botoes, text="Visualizar e-mail", command=self.visualizar).pack(side="left", padx=5)
+        if self.metodo == "smtp":
+            ttk.Button(botoes, text="Credenciais...", command=self.pedir_credenciais).pack(
+                side="left", padx=5)
         self.btn_enviar = ttk.Button(botoes, text="Enviar selecionados", command=self.enviar_selecionados)
         self.btn_enviar.pack(side="right")
         self.btn_parar = ttk.Button(botoes, text="Parar", state="disabled", command=self.parar_envio)
@@ -118,8 +189,17 @@ class App:
         self.log.pack(fill="x", padx=10, pady=(0, 10))
 
         self.root.after(150, self.processar_fila)
+        if self.metodo == "smtp" and not ef.credenciais_ok():
+            self.root.after(300, self.pedir_credenciais)  # primeira execução
 
     # -------------------------------------------------------------- ações
+
+    def pedir_credenciais(self) -> bool:
+        dialogo = DialogoCredenciais(self.root, self.cfg)
+        self.root.wait_window(dialogo)
+        if dialogo.salvo:
+            self.escrever_log(f"Credenciais salvas para {os.environ.get('SMTP_USUARIO')}.")
+        return dialogo.salvo
 
     def escrever_log(self, texto):
         self.log.configure(state="normal")
@@ -194,7 +274,9 @@ class App:
     def enviar_selecionados(self):
         if self.enviando:
             return
-        selecionados = [self.envios[d] for d in self.tree.selection()]
+        if self.metodo == "smtp" and not ef.credenciais_ok() and not self.pedir_credenciais():
+            return
+        selecionados =[self.envios[d] for d in self.tree.selection()]
         if not selecionados:
             messagebox.showinfo("Enviar", "Selecione ao menos um agregado na lista.")
             return
