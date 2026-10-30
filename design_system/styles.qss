@@ -1,0 +1,174 @@
+/* Estilos globais do Design System.
+   Cada token no formato arroba+nome é trocado pelo valor de themes.py antes de aplicar. */
+
+/* ---------- Base ---------- */
+QWidget { color: @texto; font-size: @fonte; }
+QMainWindow, QDialog, #Conteudo { background: @conteudo; }
+QDialog#Modal { background: @cartao; }
+QLabel { background: transparent; }
+
+QLabel[papel="titulo"] { font-size: @fonte_titulo; font-weight: 600; }
+QLabel[papel="subtitulo"] { font-size: @fonte_subtitulo; font-weight: 600; }
+QLabel[papel="rotulo"] { font-size: @fonte_rotulo; font-weight: 600; }
+QLabel[papel="dica"] { font-size: @fonte_rotulo; color: @texto_suave; }
+QLabel[papel="suave"] { color: @texto_suave; }
+QLabel[papel="erro"] { font-size: @fonte_rotulo; color: @perigo; }
+QLabel[papel="valor"] { font-size: @fonte_valor; font-weight: 600; }
+QLabel[papel="marca"] { font-size: @fonte_marca; font-weight: 600; }
+
+QToolTip {
+    background: @dica_fundo; color: @dica_texto;
+    border: none; border-radius: 6px; padding: 6px 8px;
+}
+
+/* ---------- Estrutura: barra lateral, cabeçalho, cartões, modal ---------- */
+#BarraLateral { background: @barra; border-right: 1px solid @borda; }
+#Cabecalho { background: @barra; border-bottom: 1px solid @borda; }
+#Cartao { background: @cartao; border: 1px solid @borda; border-radius: @raio_cartao; }
+#ModalRodape { background: @fundo_secundario; border-top: 1px solid @borda; }
+
+QLabel#IconeIndicador { border-radius: @raio; }
+QLabel#IconeIndicador[tom="primaria"] { background: @primaria_suave; }
+QLabel#IconeIndicador[tom="sucesso"] { background: @sucesso_suave; }
+QLabel#IconeIndicador[tom="perigo"] { background: @perigo_suave; }
+QLabel#IconeIndicador[tom="neutro"] { background: @neutro_suave; }
+
+QPushButton[nav="true"] {
+    background: transparent; color: @texto_suave;
+    border: none; border-radius: @raio; padding: 0 12px; text-align: left;
+}
+QPushButton[nav="true"]:hover { background: @hover; color: @texto; }
+QPushButton[nav="true"]:checked { background: @primaria_suave; color: @primaria; font-weight: 600; }
+
+/* ---------- Botões ---------- */
+QPushButton {
+    background: @cartao; color: @texto;
+    border: 1px solid @borda; border-radius: @raio;
+    padding: 0 16px; font-weight: 600;
+}
+QPushButton:hover { background: @hover; border-color: @borda_forte; }
+QPushButton:pressed { background: @pressionado; }
+QPushButton:focus { border-color: @primaria; }
+QPushButton:disabled { background: @desab_fundo; color: @desab_texto; border-color: @borda; }
+
+QPushButton[variante="primario"] { background: @primaria; color: @branco; border-color: @primaria; }
+QPushButton[variante="primario"]:hover { background: @primaria_hover; border-color: @primaria_hover; }
+QPushButton[variante="primario"]:pressed { background: @primaria_press; border-color: @primaria_press; }
+QPushButton[variante="primario"]:focus { border-color: @primaria_press; }
+QPushButton[variante="primario"]:disabled { background: @primaria_desab; border-color: @primaria_desab; color: @branco; }
+
+QPushButton[variante="perigo"] { background: @perigo; color: @branco; border-color: @perigo; }
+QPushButton[variante="perigo"]:hover { background: @perigo_hover; border-color: @perigo_hover; }
+QPushButton[variante="perigo"]:pressed { background: @perigo_press; border-color: @perigo_press; }
+QPushButton[variante="perigo"]:focus { border-color: @perigo_press; }
+QPushButton[variante="perigo"]:disabled { background: @perigo_desab; border-color: @perigo_desab; color: @branco; }
+
+QPushButton[variante="fantasma"] { background: transparent; color: @texto_suave; border-color: transparent; }
+QPushButton[variante="fantasma"]:hover { background: @hover; color: @texto; }
+QPushButton[variante="fantasma"]:pressed { background: @pressionado; }
+QPushButton[variante="fantasma"]:focus { border-color: @primaria; }
+QPushButton[variante="fantasma"]:disabled { background: transparent; color: @desab_texto; }
+
+QPushButton[tamanho="sm"] { padding: 0 12px; font-size: @fonte_rotulo; }
+QPushButton[tamanho="lg"] { padding: 0 24px; font-size: @fonte_subtitulo; }
+QPushButton[so_icone="true"] { padding: 0; }
+
+QPushButton::menu-indicator {
+    image: url("@icone_seta"); subcontrol-origin: padding; subcontrol-position: center right; right: 8px;
+}
+QPushButton[com_menu="true"] { padding-right: 32px; }
+
+/* ---------- Campos ---------- */
+QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox {
+    background: @campo_fundo; color: @texto;
+    border: 1px solid @borda; border-radius: @raio;
+    padding: 0 12px;
+    selection-background-color: @primaria; selection-color: @branco;
+}
+QPlainTextEdit, QTextEdit { padding: 8px 12px; }
+QPlainTextEdit[papel="log"] {
+    background: @fundo_secundario; font-family: "Consolas", "Menlo", monospace; font-size: @fonte_rotulo;
+}
+QLineEdit:hover, QPlainTextEdit:hover, QTextEdit:hover, QComboBox:hover, QSpinBox:hover { border-color: @borda_forte; }
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus { border-color: @primaria; }
+QLineEdit[readOnly="true"] { background: @fundo_secundario; }
+QLineEdit:disabled, QPlainTextEdit:disabled, QTextEdit:disabled, QComboBox:disabled, QSpinBox:disabled {
+    background: @desab_fundo; color: @desab_texto; border-color: @borda;
+}
+QLineEdit[erro="true"], QPlainTextEdit[erro="true"], QComboBox[erro="true"] { border-color: @perigo; }
+
+QComboBox::drop-down {
+    subcontrol-origin: padding; subcontrol-position: center right;
+    width: 32px; border: none;
+}
+QComboBox::down-arrow { image: url("@icone_seta"); width: 16px; height: 16px; }
+QComboBox QAbstractItemView {
+    background: @cartao; color: @texto;
+    border: 1px solid @borda; border-radius: @raio; padding: 4px; outline: none;
+}
+QComboBox QAbstractItemView::item { min-height: 32px; padding: 0 8px; border-radius: 6px; }
+QComboBox QAbstractItemView::item:hover { background: @hover; }
+QComboBox QAbstractItemView::item:selected { background: @primaria_suave; color: @texto; }
+
+/* ---------- Checkbox ---------- */
+QCheckBox { spacing: 8px; background: transparent; }
+QCheckBox::indicator {
+    width: @check; height: @check;
+    border: 1px solid @borda_forte; border-radius: @raio_pequeno; background: @campo_fundo;
+}
+QCheckBox::indicator:hover { border-color: @primaria; }
+QCheckBox::indicator:checked { background: @primaria; border-color: @primaria; image: url("@icone_check"); }
+QCheckBox::indicator:disabled { background: @desab_fundo; border-color: @borda; }
+QCheckBox::indicator:checked:disabled { background: @primaria_desab; border-color: @primaria_desab; }
+QCheckBox:disabled { color: @desab_texto; }
+
+/* ---------- Etiquetas (badges) ---------- */
+QLabel[etiqueta="true"] {
+    border-radius: 11px; padding: 0 @etiqueta_padding;
+    font-size: @fonte_rotulo; font-weight: 600;
+}
+QLabel[etiqueta="true"][tom="primaria"] { background: @primaria_suave; color: @primaria; }
+QLabel[etiqueta="true"][tom="sucesso"] { background: @sucesso_suave; color: @sucesso; }
+QLabel[etiqueta="true"][tom="perigo"] { background: @perigo_suave; color: @perigo; }
+QLabel[etiqueta="true"][tom="neutro"] { background: @neutro_suave; color: @texto_suave; }
+
+/* ---------- Tabela ---------- */
+QTableView {
+    background: @cartao; color: @texto;
+    border: none; gridline-color: @borda; outline: none;
+    selection-background-color: @selecao; selection-color: @texto;
+}
+QTableView::item { padding: 0 12px; border-bottom: 1px solid @borda; }
+QTableView::item:hover { background: @hover; }
+QTableView::item:selected { background: @selecao; color: @texto; }
+QHeaderView { background: @fundo_secundario; border: none; }
+QHeaderView::section {
+    background: @fundo_secundario; color: @texto_suave;
+    border: none; border-bottom: 1px solid @borda;
+    padding: 0 12px; font-size: @fonte_rotulo; font-weight: 600;
+}
+QTableCornerButton::section { background: @fundo_secundario; border: none; }
+
+/* ---------- Menus ---------- */
+QMenu {
+    background: @cartao; color: @texto;
+    border: 1px solid @borda; border-radius: @raio; padding: 4px;
+}
+QMenu::item { padding: 8px 24px 8px 12px; border-radius: 6px; }
+QMenu::item:selected { background: @hover; }
+QMenu::item:disabled { color: @desab_texto; }
+QMenu::separator { height: 1px; background: @borda; margin: 4px 8px; }
+
+/* ---------- Barra de progresso ---------- */
+QProgressBar { background: @hover; border: none; border-radius: @raio_pequeno; color: transparent; }
+QProgressBar::chunk { background: @primaria; border-radius: @raio_pequeno; }
+
+/* ---------- Rolagem ---------- */
+QScrollArea { background: transparent; border: none; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
+QScrollBar::handle:vertical { background: @rolagem; border-radius: @raio_pequeno; min-height: 32px; }
+QScrollBar::handle:horizontal { background: @rolagem; border-radius: @raio_pequeno; min-width: 32px; }
+QScrollBar::handle:hover { background: @texto_suave; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: none; }

@@ -6,9 +6,10 @@ $exe = "dist\$nome.exe"
 $antes = if (Test-Path $exe) { (Get-Item $exe).LastWriteTime } else { [datetime]::MinValue }
 
 python -m PyInstaller --noconfirm --onefile --windowed --name $nome `
-    --add-data "$PSScriptRoot\config.ini;." --hidden-import openpyxl --hidden-import pythoncom `
-    --hidden-import win32com.client --exclude-module matplotlib --exclude-module scipy `
-    --exclude-module IPython --workpath build --specpath build --distpath dist app.py
+    --add-data "$PSScriptRoot\config.ini;." --add-data "$PSScriptRoot\design_system\styles.qss;design_system" `
+    --hidden-import openpyxl --hidden-import pythoncom --hidden-import win32com.client `
+    --exclude-module matplotlib --exclude-module scipy --exclude-module IPython --exclude-module tkinter `
+    --workpath build --specpath build --distpath dist app.py
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exe) -or (Get-Item $exe).LastWriteTime -le $antes) {
     Write-Host "`nERRO: o build falhou; nenhum arquivo novo foi gerado." -ForegroundColor Red
     exit 1

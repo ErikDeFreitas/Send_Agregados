@@ -8,17 +8,31 @@ import sys
 import tempfile
 import threading
 import time
-import tkinter as tk
 import webbrowser
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+
+from PySide6.QtCore import QItemSelectionModel, QTimer
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QApplication, QFileDialog, QGridLayout, QHBoxLayout, QLineEdit, QMainWindow, QVBoxLayout, QWidget,
+)
 
 import atualizador
 import enviar_fretes as ef
+from design_system import icons
+from design_system.components import (
+    AreaLog, BarraLateral, BarraProgresso, Botao, BotaoTema, Cabecalho, Campo, CampoTexto, Cartao,
+    CartaoIndicador, Etiqueta, GradeResponsiva, Modal, Pagina, Tabela, Texto,
+)
+from design_system.themes import ESPACO, MARCA, TAMANHOS, tema
 from versao import VERSAO
 
 ARQUIVO_PREFS = ef.PASTA / "preferencias.json"
+
+# coluna "Status" da lista e tom da etiqueta para cada marcação usada pela thread de envio
+COL_EMAIL, COL_STATUS = 4, 5
+TOM_STATUS = {"": "primaria", "enviado": "sucesso", "erro": "perigo"}
 
 
 def ler_prefs() -> dict:
@@ -35,169 +49,215 @@ def salvar_prefs(prefs: dict):
         pass
 
 
-class DialogoCredenciais(tk.Toplevel):
+class DialogoCredenciais(Modal):
     """Pede usuário e senha do remetente, testa o login e grava no .env."""
 
     def __init__(self, pai, cfg):
-        super().__init__(pai)
+        super().__init__("Credenciais do remetente",
+                         "Informe o e-mail remetente e a senha da conta que enviará os extratos. "
+                         "Os dados ficam salvos só neste computador (arquivo .env).", pai)
         self.cfg, self.salvo = cfg, False
-        self.title("Credenciais do remetente")
-        self.resizable(False, False)
-        self.transient(pai)
+        self.campo_usuario = CampoTexto("envios@empresa.com.br")
+        self.campo_usuario.setText(os.environ.get("SMTP_USUARIO", ""))
+        self.campo_senha = CampoTexto()
+        self.campo_senha.setEchoMode(QLineEdit.Password)
+        self.campo_cco = CampoTexto()
+        self.campo_cco.setText(ef.cco_padrao(cfg))
+        self.corpo.addSpacing(ESPACO["sm"])
+        self.corpo.addWidget(Campo("E-mail", self.campo_usuario))
+        self.corpo.addWidget(Campo("Senha", self.campo_senha))
+        self.corpo.addWidget(Campo("CCO padrão", self.campo_cco, "Cópia oculta, opcional; vários separados por ;"))
+        self.msg = Texto("", "erro")
+        self.msg.setWordWrap(True)
+        self.msg.hide()
+        self.corpo.addWidget(self.msg)
 
-        corpo = ttk.Frame(self, padding=15)
-        corpo.pack(fill="both", expand=True)
-        corpo.columnconfigure(1, weight=1)
-        ttk.Label(corpo, text="Informe o e-mail remetente e a senha da conta que enviará os extratos.\n"
-                              "Os dados ficam salvos só neste computador (arquivo .env).",
-                  justify="left").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        ttk.Label(corpo, text="E-mail:").grid(row=1, column=0, sticky="w", pady=3)
-        self.var_usuario = tk.StringVar(value=os.environ.get("SMTP_USUARIO", ""))
-        self.campo_usuario = ttk.Entry(corpo, textvariable=self.var_usuario, width=38)
-        self.campo_usuario.grid(row=1, column=1, padx=(8, 0))
-        ttk.Label(corpo, text="Senha:").grid(row=2, column=0, sticky="w", pady=3)
-        self.var_senha = tk.StringVar()
-        self.campo_senha = ttk.Entry(corpo, textvariable=self.var_senha, show="*", width=38)
-        self.campo_senha.grid(row=2, column=1, padx=(8, 0))
-        ttk.Label(corpo, text="CCO padrão:").grid(row=3, column=0, sticky="w", pady=3)
-        self.var_cco = tk.StringVar(value=ef.cco_padrao(cfg))
-        ttk.Entry(corpo, textvariable=self.var_cco, width=38).grid(row=3, column=1, padx=(8, 0))
-        ttk.Label(corpo, text="cópia oculta, opcional; vários separados por ;", foreground="gray").grid(
-            row=4, column=1, sticky="w", padx=(8, 0))
-        self.var_msg = tk.StringVar()
-        ttk.Label(corpo, textvariable=self.var_msg, foreground="#b00020", wraplength=330,
-                  justify="left").grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.adicionar_botao(Botao("Cancelar", "secundario")).clicked.connect(self.reject)
+        self.btn_salvar = self.adicionar_botao(Botao("Testar e salvar"))
+        self.btn_salvar.clicked.connect(self.salvar)
+        self.btn_salvar.setDefault(True)  # Enter salva; Esc fecha (padrão do QDialog)
+        (self.campo_senha if self.campo_usuario.text() else self.campo_usuario).setFocus()
 
-        botoes = ttk.Frame(corpo)
-        botoes.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
-        self.btn_salvar = ttk.Button(botoes, text="Testar e salvar", command=self.salvar)
-        self.btn_salvar.pack(side="left", padx=5)
-        ttk.Button(botoes, text="Cancelar", command=self.destroy).pack(side="left")
-
-        self.bind("<Return>", lambda _: self.salvar())
-        self.bind("<Escape>", lambda _: self.destroy())
-        (self.campo_senha if self.var_usuario.get() else self.campo_usuario).focus_set()
-        self.grab_set()
+    def mensagem(self, texto: str, erro: bool = True):
+        self.msg.setProperty("papel", "erro" if erro else "suave")
+        self.msg.style().unpolish(self.msg)
+        self.msg.style().polish(self.msg)
+        self.msg.setText(texto)
+        self.msg.show()
 
     def salvar(self):
-        usuario, senha = self.var_usuario.get().strip(), self.var_senha.get()
-        cco = self.var_cco.get().strip()
+        usuario, senha = self.campo_usuario.text().strip(), self.campo_senha.text()
+        cco = self.campo_cco.text().strip()
         if ef.emails_invalidos(usuario) or not usuario:
-            self.var_msg.set("Informe um e-mail válido.")
+            self.mensagem("Informe um e-mail válido.")
             return
         if not senha:
-            self.var_msg.set("Informe a senha.")
+            self.mensagem("Informe a senha.")
             return
         if ef.emails_invalidos(cco):
-            self.var_msg.set(f"CCO inválido: {', '.join(ef.emails_invalidos(cco))}")
+            self.mensagem(f"CCO inválido: {', '.join(ef.emails_invalidos(cco))}")
             return
-        self.var_msg.set("Testando o login no servidor...")
-        self.btn_salvar.configure(state="disabled")
-        self.update_idletasks()
+        self.mensagem("Testando o login no servidor...", erro=False)
+        self.btn_salvar.setEnabled(False)
+        QApplication.processEvents()
         try:
             ef.testar_login(self.cfg, usuario, senha)
         except ef.ErroEnvio as e:
-            self.var_msg.set(str(e))
-            self.btn_salvar.configure(state="normal")
+            self.mensagem(str(e))
+            self.btn_salvar.setEnabled(True)
             return
         try:
             ef.salvar_env(usuario, senha, cco)
         except OSError:
-            self.var_msg.set("Não foi possível gravar o arquivo .env nesta pasta. "
-                             "Verifique a permissão de escrita na pasta de dados do programa.")
-            self.btn_salvar.configure(state="normal")
+            self.mensagem("Não foi possível gravar o arquivo .env nesta pasta. "
+                          "Verifique a permissão de escrita na pasta de dados do programa.")
+            self.btn_salvar.setEnabled(True)
             return
         self.salvo = True
-        self.destroy()
+        self.accept()
 
 
-class App:
-    def __init__(self, root: tk.Tk):
-        self.root = root
+class App(QMainWindow):
+    def __init__(self):
+        super().__init__()
         self.cfg = ef.carregar_config()
         self.prefs = ler_prefs()
         self.envios = {}
+        self.linhas = {}  # doc -> linha da tabela
+        self.status = {}  # doc -> marcação atual ("", "enviado", "erro")
+        self.concluidos = set()
         self.fila = queue.Queue()
         self.enviando = False
         self.parar = threading.Event()
-
-        root.title(f"RoboAgregado - Extrato de Fretes (v{VERSAO})")
-        root.geometry("980x620")
-        root.minsize(800, 500)
-
-        topo = ttk.Frame(root, padding=10)
-        topo.pack(fill="x")
-        topo.columnconfigure(1, weight=1)
-
-        ttk.Label(topo, text="Planilha:").grid(row=0, column=0, sticky="w", pady=3)
-        self.var_planilha = tk.StringVar()
-        ttk.Entry(topo, textvariable=self.var_planilha, state="readonly").grid(
-            row=0, column=1, sticky="ew", padx=5)
-        ttk.Button(topo, text="Selecionar planilha...", command=self.selecionar_planilha).grid(
-            row=0, column=2, sticky="ew")
 
         # o remetente vem das credenciais (.env); só o método Outlook usa o enviar_como do config.ini
         self.metodo = self.cfg["email"].get("metodo", "outlook").strip().lower()
         self.chave_cco = f"cco_{self.metodo}"
 
-        ttk.Label(topo, text="Cópia oculta (CCO):").grid(row=1, column=0, sticky="w", pady=3)
-        self.var_cco = tk.StringVar(
-            value=self.prefs.get(self.chave_cco, ef.cco_padrao(self.cfg)))
-        ttk.Entry(topo, textvariable=self.var_cco).grid(row=1, column=1, sticky="ew", padx=5)
-        ttk.Label(topo, text="separe vários com ;", foreground="gray").grid(
-            row=1, column=2, sticky="w")
+        self.setWindowTitle(f"RoboAgregado - Extrato de Fretes (v{VERSAO})")
+        self.setWindowIcon(icons.icone("caminhao", MARCA["primaria"], 32))
+        self.resize(1200, 820)
+        self.setMinimumSize(900, 600)
 
-        ttk.Label(topo, text="Intervalo (s):").grid(row=2, column=0, sticky="w", pady=3)
-        self.var_intervalo = tk.StringVar(value=str(
-            self.prefs.get("intervalo", self.cfg["email"].get("intervalo_segundos", "5"))))
-        ttk.Spinbox(topo, from_=0, to=300, width=6, textvariable=self.var_intervalo).grid(
-            row=2, column=1, sticky="w", padx=5)
-        ttk.Label(topo, text="espera entre um envio e outro", foreground="gray").grid(
-            row=2, column=2, sticky="w")
-
-        meio = ttk.Frame(root, padding=(10, 0))
-        meio.pack(fill="both", expand=True)
-        colunas = ("doc", "nome", "fretes", "total", "email", "status")
-        self.tree = ttk.Treeview(meio, columns=colunas, show="headings", selectmode="extended")
-        for col, titulo, largura, ancora in [
-            ("doc", "CNPJ/CPF", 140, "w"), ("nome", "Agregado", 260, "w"),
-            ("fretes", "Fretes", 60, "center"), ("total", "Total", 110, "e"),
-            ("email", "E-mail", 220, "w"), ("status", "Status", 120, "w")]:
-            self.tree.heading(col, text=titulo)
-            self.tree.column(col, width=largura, anchor=ancora)
-        self.tree.tag_configure("sem_email", foreground="#b00020")
-        self.tree.tag_configure("enviado", foreground="#1b7f3b")
-        self.tree.tag_configure("erro", foreground="#b00020")
-        barra = ttk.Scrollbar(meio, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=barra.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        barra.pack(side="right", fill="y")
-        self.tree.bind("<Double-1>", lambda _: self.visualizar())
-
-        botoes = ttk.Frame(root, padding=10)
-        botoes.pack(fill="x")
-        ttk.Button(botoes, text="Selecionar todos",
-                   command=lambda: self.tree.selection_set(self.tree.get_children())).pack(side="left")
-        ttk.Button(botoes, text="Visualizar e-mail", command=self.visualizar).pack(side="left", padx=5)
+        barra = BarraLateral("RoboAgregado")
+        barra.adicionar_item("extrato", "Extrato de fretes", "enviar")
         if self.metodo == "smtp":
-            ttk.Button(botoes, text="Credenciais...", command=self.pedir_credenciais).pack(
-                side="left", padx=5)
-        ttk.Button(botoes, text="Pasta de dados", command=lambda: os.startfile(ef.PASTA)).pack(
-            side="left")
-        self.btn_enviar = ttk.Button(botoes, text="Enviar selecionados", command=self.enviar_selecionados)
-        self.btn_enviar.pack(side="right")
-        self.btn_parar = ttk.Button(botoes, text="Parar", state="disabled", command=self.parar_envio)
-        self.btn_parar.pack(side="right", padx=5)
-        self.var_resumo = tk.StringVar(value="Selecione a planilha para começar.")
-        ttk.Label(botoes, textvariable=self.var_resumo).pack(side="left", padx=15)
+            credenciais = Botao("Credenciais...", "secundario", icone="chave")
+            credenciais.clicked.connect(self.pedir_credenciais)
+            barra.adicionar_rodape(credenciais)
+        pasta = Botao("Pasta de dados", "secundario", icone="pasta")
+        pasta.clicked.connect(lambda: os.startfile(ef.PASTA))
+        barra.adicionar_rodape(pasta)
+        barra.adicionar_rodape(Texto(f"Versão {VERSAO}", "dica"))
 
-        self.log = tk.Text(root, height=7, state="disabled", font=("Consolas", 9))
-        self.log.pack(fill="x", padx=10, pady=(0, 10))
+        cabecalho = Cabecalho("Extrato de fretes", "Envio dos extratos semanais aos agregados")
+        cabecalho.adicionar(BotaoTema())
 
-        self.root.after(150, self.processar_fila)
+        pagina = Pagina()
+        pagina.conteudo.addWidget(self._indicadores())
+        pagina.conteudo.addWidget(self._cartao_configuracao())
+        pagina.conteudo.addWidget(self._cartao_agregados(), 1)
+        registro = Cartao("Registro")
+        self.log = AreaLog()
+        self.log.setFixedHeight(150)
+        registro.corpo.addWidget(self.log)
+        pagina.conteudo.addWidget(registro)
+
+        direita = QVBoxLayout()
+        direita.setContentsMargins(0, 0, 0, 0)
+        direita.setSpacing(0)
+        direita.addWidget(cabecalho)
+        direita.addWidget(pagina, 1)
+        raiz = QHBoxLayout()
+        raiz.setContentsMargins(0, 0, 0, 0)
+        raiz.setSpacing(0)
+        raiz.addWidget(barra)
+        raiz.addLayout(direita, 1)
+        central = QWidget()
+        central.setLayout(raiz)
+        self.setCentralWidget(central)
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.processar_fila)
+        self.timer.start(150)
         if self.metodo == "smtp" and not ef.credenciais_ok():
-            self.root.after(300, self.pedir_credenciais)  # primeira execução
-        self.root.after(1000, self.verificar_atualizacao)
+            QTimer.singleShot(300, self.pedir_credenciais)  # primeira execução
+        QTimer.singleShot(1000, self.verificar_atualizacao)
+
+    # -------------------------------------------------------------- montagem da tela
+
+    def _indicadores(self) -> QWidget:
+        grade = GradeResponsiva(200)
+        self.ind_agregados = CartaoIndicador("Agregados", "–", "usuarios", "primaria")
+        self.ind_sem_email = CartaoIndicador("Sem e-mail", "–", "alerta", "neutro")
+        self.ind_enviados = CartaoIndicador("Enviados", "–", "enviar", "sucesso")
+        self.ind_erros = CartaoIndicador("Com erro", "–", "alerta", "perigo")
+        for cartao in (self.ind_agregados, self.ind_sem_email, self.ind_enviados, self.ind_erros):
+            grade.adicionar(cartao)
+        return grade
+
+    def _cartao_configuracao(self) -> QWidget:
+        cartao = Cartao("Configuração do envio")
+        grade = QGridLayout()
+        grade.setHorizontalSpacing(ESPACO["lg"])
+        grade.setVerticalSpacing(ESPACO["lg"])
+
+        linha = QHBoxLayout()
+        linha.setContentsMargins(0, 0, 0, 0)
+        linha.setSpacing(ESPACO["sm"])
+        self.campo_planilha = CampoTexto("Nenhuma planilha selecionada")
+        self.campo_planilha.setReadOnly(True)
+        linha.addWidget(self.campo_planilha, 1)
+        selecionar = Botao("Selecionar planilha...", "secundario", icone="pasta")
+        selecionar.clicked.connect(self.selecionar_planilha)
+        linha.addWidget(selecionar)
+        caixa = QWidget()
+        caixa.setLayout(linha)
+        grade.addWidget(Campo("Planilha", caixa), 0, 0, 1, 2)
+
+        self.campo_cco = CampoTexto("email@empresa.com.br")
+        self.campo_cco.setText(self.prefs.get(self.chave_cco, ef.cco_padrao(self.cfg)))
+        grade.addWidget(Campo("Cópia oculta (CCO)", self.campo_cco, "Separe vários com ;"), 1, 0)
+        self.campo_intervalo = CampoTexto()
+        self.campo_intervalo.setText(str(
+            self.prefs.get("intervalo", self.cfg["email"].get("intervalo_segundos", "5"))))
+        grade.addWidget(Campo("Intervalo (s)", self.campo_intervalo, "Espera entre um envio e outro"), 1, 1)
+        grade.setColumnStretch(0, 3)
+        grade.setColumnStretch(1, 1)
+        cartao.corpo.addLayout(grade)
+        return cartao
+
+    def _cartao_agregados(self) -> QWidget:
+        self.cartao_lista = Cartao("Agregados", "Selecione a planilha para começar.")
+        todos = Botao("Selecionar todos", "secundario", "sm")
+        self.cartao_lista.adicionar_acao(todos)
+
+        self.tabela = Tabela(["CNPJ/CPF", "Agregado", "Fretes", "Total", "E-mail", "Status"],
+                             alinhar_direita=(2, 3), coluna_flexivel=1)
+        self.tabela.setMinimumHeight(TAMANHOS["linha_tabela"] * 6 + TAMANHOS["cabecalho_tabela"])
+        self.tabela.doubleClicked.connect(lambda _: self.visualizar())
+        todos.clicked.connect(self.tabela.selectAll)
+        self.cartao_lista.corpo.addWidget(self.tabela, 1)
+
+        self.progresso = BarraProgresso()
+        self.progresso.setValue(0)
+        self.cartao_lista.corpo.addWidget(self.progresso)
+        acoes = QHBoxLayout()
+        acoes.setSpacing(ESPACO["sm"])
+        self.texto_progresso = Texto("", "dica")
+        acoes.addWidget(self.texto_progresso, 1)
+        visualizar = Botao("Visualizar e-mail", "secundario", icone="olho")
+        visualizar.clicked.connect(self.visualizar)
+        acoes.addWidget(visualizar)
+        self.btn_parar = Botao("Parar", "perigo", icone="parar")
+        self.btn_parar.setEnabled(False)
+        self.btn_parar.clicked.connect(self.parar_envio)
+        acoes.addWidget(self.btn_parar)
+        self.btn_enviar = Botao("Enviar selecionados", icone="enviar")
+        self.btn_enviar.clicked.connect(self.enviar_selecionados)
+        acoes.addWidget(self.btn_enviar)
+        self.cartao_lista.corpo.addLayout(acoes)
+        return self.cartao_lista
 
     # -------------------------------------------------------------- atualização
 
@@ -233,41 +293,37 @@ class App:
             novo.unlink(missing_ok=True)
             self.escrever_log("Atualização adiada: há um envio em andamento. Será tentada na próxima abertura.")
             return
-        messagebox.showinfo("Atualização", f"Nova versão {versao} instalada.\n"
-                                           "O programa será reiniciado agora.")
+        Modal.informar(self, "Atualização", f"Nova versão {versao} instalada.\n"
+                                            "O programa será reiniciado agora.", "sucesso")
         try:
             atualizador.aplicar_e_reiniciar(novo)
         except atualizador.ErroAtualizacao as e:
             novo.unlink(missing_ok=True)
-            messagebox.showwarning("Atualização", f"{e}\nO programa continuará na versão atual.")
+            Modal.informar(self, "Atualização", f"{e}\nO programa continuará na versão atual.", "perigo")
             return
-        self.root.destroy()
+        self.close()
         os._exit(0)
 
     # -------------------------------------------------------------- ações
 
     def pedir_credenciais(self) -> bool:
-        dialogo = DialogoCredenciais(self.root, self.cfg)
-        self.root.wait_window(dialogo)
+        dialogo = DialogoCredenciais(self, self.cfg)
+        dialogo.exec()
         if dialogo.salvo:
-            self.var_cco.set(os.environ.get("EMAIL_CCO", ""))
+            self.campo_cco.setText(os.environ.get("EMAIL_CCO", ""))
             self.escrever_log(f"Credenciais salvas para {os.environ.get('SMTP_USUARIO')}.")
         return dialogo.salvo
 
     def escrever_log(self, texto):
-        self.log.configure(state="normal")
-        self.log.insert("end", texto + "\n")
-        self.log.see("end")
-        self.log.configure(state="disabled")
+        self.log.escrever(texto)
 
     def selecionar_planilha(self):
         pasta = Path(self.prefs.get("planilha", "")).parent if self.prefs.get("planilha") else None
-        caminho = filedialog.askopenfilename(
-            title="Selecione a planilha de fretes",
-            initialdir=str(pasta) if pasta and pasta.exists() else None,
-            filetypes=[("Planilhas Excel", "*.xlsx *.xlsm"), ("Todos os arquivos", "*.*")])
+        caminho, _ = QFileDialog.getOpenFileName(
+            self, "Selecione a planilha de fretes", str(pasta) if pasta and pasta.exists() else "",
+            "Planilhas Excel (*.xlsx *.xlsm);;Todos os arquivos (*.*)")
         if caminho:
-            self.carregar(caminho)
+            self.carregar(str(Path(caminho)))
 
     def carregar(self, caminho):
         try:
@@ -275,43 +331,71 @@ class App:
             envios = ef.preparar_envios(self.cfg, df, emails,
                                         periodo_fixo=self.cfg["email"].get("periodo", ""))
         except ef.ErroPlanilha as e:
-            messagebox.showerror("Planilha inválida", str(e))
+            Modal.informar(self, "Planilha inválida", str(e), "perigo")
             return
         except PermissionError:
-            messagebox.showerror("Planilha em uso",
-                                 "Não foi possível ler a planilha. Feche-a no Excel e tente novamente.")
+            Modal.informar(self, "Planilha em uso",
+                           "Não foi possível ler a planilha. Feche-a no Excel e tente novamente.", "perigo")
             return
         except Exception as e:
-            messagebox.showerror("Erro ao ler a planilha", f"{type(e).__name__}: {e}")
+            Modal.informar(self, "Erro ao ler a planilha", f"{type(e).__name__}: {e}", "perigo")
             return
 
-        self.var_planilha.set(caminho)
+        self.campo_planilha.setText(caminho)
         self.prefs["planilha"] = caminho
         salvar_prefs(self.prefs)
-        self.tree.delete(*self.tree.get_children())
+        self.tabela.setRowCount(0)
         self.envios = {e["doc"]: e for e in envios}
+        self.linhas, self.status = {}, {}
         sem_email = 0
         for e in envios:
             if not e["email"]:
                 sem_email += 1
-            self.tree.insert("", "end", iid=e["doc"], tags=("" if e["email"] else "sem_email",), values=(
+            linha = self.tabela.adicionar_linha([
                 ef.formatar_documento(e["doc"]), e["nome"], e["fretes"],
                 ef.formatar_moeda(e["total"]) if e.get("total") is not None else "",
-                e["email"] or "SEM E-MAIL", ""))
-        self.tree.selection_set([d for d, e in self.envios.items() if e["email"]])
+                e["email"] or "SEM E-MAIL", ""])
+            if not e["email"]:
+                self.tabela.item(linha, COL_EMAIL).setForeground(QColor(MARCA["perigo"]))
+            self.linhas[e["doc"]] = linha
+        self.tabela.clearSelection()
+        for doc, e in self.envios.items():
+            if e["email"]:
+                self._selecionar_linha(self.linhas[doc])
         resumo = f"{len(envios)} agregado(s) encontrados"
         if sem_email:
             resumo += f" | {sem_email} sem e-mail"
-        self.var_resumo.set(resumo)
+        self.cartao_lista.definir_subtitulo(resumo)
+        self.ind_agregados.definir_valor(str(len(envios)))
+        self.ind_sem_email.definir_valor(str(sem_email))
+        self._atualizar_contadores()
+        self.progresso.setValue(0)
+        self.texto_progresso.setText("")
         self.escrever_log(f"Planilha carregada: {caminho} ({len(envios)} agregados)")
 
+    def _selecionar_linha(self, linha):
+        """Acrescenta a linha à seleção (selectRow trocaria a seleção inteira)."""
+        modelo = self.tabela.selectionModel()
+        modelo.select(self.tabela.model().index(linha, 0),
+                      QItemSelectionModel.Select | QItemSelectionModel.Rows)
+
+    def _selecionados(self) -> list:
+        """Documentos das linhas selecionadas, na ordem da lista."""
+        por_linha = {linha: doc for doc, linha in self.linhas.items()}
+        linhas = sorted(i.row() for i in self.tabela.selectionModel().selectedRows())
+        return [por_linha[l] for l in linhas]
+
+    def _atualizar_contadores(self):
+        self.ind_enviados.definir_valor(str(sum(1 for t in self.status.values() if t == "enviado")))
+        self.ind_erros.definir_valor(str(sum(1 for t in self.status.values() if t == "erro")))
+
     def visualizar(self):
-        sel = self.tree.selection()
+        sel = self._selecionados()
         if not sel:
-            messagebox.showinfo("Visualizar", "Selecione um agregado na lista.")
+            Modal.informar(self, "Visualizar", "Selecione um agregado na lista.")
             return
         e = self.envios[sel[0]]
-        cco = self.var_cco.get().strip()
+        cco = self.campo_cco.text().strip()
         cabecalho = (f'<div style="font-family:Segoe UI,Arial;font-size:13px;background:#f4f4f4;'
                      f'padding:10px;margin-bottom:15px;border:1px solid #ddd">'
                      f'<b>Para:</b> {html.escape(e["email"] or "SEM E-MAIL")}<br>'
@@ -329,37 +413,36 @@ class App:
             return
         if self.metodo == "smtp" and not ef.credenciais_ok() and not self.pedir_credenciais():
             return
-        selecionados =[self.envios[d] for d in self.tree.selection()]
+        selecionados = [self.envios[d] for d in self._selecionados()]
         if not selecionados:
-            messagebox.showinfo("Enviar", "Selecione ao menos um agregado na lista.")
+            Modal.informar(self, "Enviar", "Selecione ao menos um agregado na lista.")
             return
         sem_email = [e for e in selecionados if not e["email"]]
         validos = [e for e in selecionados if e["email"]]
         if not validos:
-            messagebox.showwarning("Enviar", "Nenhum dos selecionados tem e-mail cadastrado.")
+            Modal.informar(self, "Enviar", "Nenhum dos selecionados tem e-mail cadastrado.", "perigo")
             return
 
         remetente = self.cfg["email"].get("enviar_como", "").strip() if self.metodo == "outlook" else ""
-        cco = self.var_cco.get().strip()
+        cco = self.campo_cco.text().strip()
         try:
-            intervalo = max(0.0, float(self.var_intervalo.get().replace(",", ".")))
+            intervalo = max(0.0, float(self.campo_intervalo.text().replace(",", ".")))
         except ValueError:
-            messagebox.showwarning("Intervalo", "Informe o intervalo em segundos (ex.: 5).")
+            Modal.informar(self, "Intervalo", "Informe o intervalo em segundos (ex.: 5).", "perigo")
             return
 
         # validação dos endereços antes de enviar qualquer coisa
         problemas = ef.emails_invalidos(remetente) + ef.emails_invalidos(cco)
         if problemas:
-            messagebox.showwarning("E-mail inválido",
-                                   "Corrija o remetente/CCO:\n" + "\n".join(problemas))
+            Modal.informar(self, "E-mail inválido", "Corrija o remetente/CCO:\n" + "\n".join(problemas), "perigo")
             return
         invalidos = [e for e in validos if ef.emails_invalidos(e["email"])]
         if invalidos:
             lista_inv = "\n".join(f"{e['nome']}: {e['email']}" for e in invalidos[:10])
-            if not messagebox.askyesno(
-                    "E-mails inválidos",
+            if not Modal.confirmar(
+                    self, "E-mails inválidos",
                     f"{len(invalidos)} agregado(s) com e-mail inválido na planilha:\n\n{lista_inv}"
-                    "\n\nContinuar enviando apenas para os demais?"):
+                    "\n\nContinuar enviando apenas para os demais?", "Continuar", tom="perigo"):
                 return
             validos = [e for e in validos if e not in invalidos]
             if not validos:
@@ -370,18 +453,19 @@ class App:
         repetidos = [(e, ef.ja_enviado(e, anteriores)) for e in validos if ef.ja_enviado(e, anteriores)]
         if repetidos:
             lista_rep = "\n".join(f"{e['nome']} (em {quando})" for e, quando in repetidos[:10])
-            resp = messagebox.askyesnocancel(
-                "Extrato já enviado",
-                f"{len(repetidos)} agregado(s) já receberam este mesmo extrato:\n\n{lista_rep}\n\n"
-                "Sim = reenviar para eles também\nNão = enviar só para os que ainda não receberam\n"
-                "Cancelar = não enviar nada")
+            resp = Modal.escolher(
+                self, "Extrato já enviado",
+                f"{len(repetidos)} agregado(s) já receberam este mesmo extrato:\n\n{lista_rep}",
+                [("Cancelar", "secundario", None),
+                 ("Reenviar para eles também", "secundario", True),
+                 ("Só para quem não recebeu", "primario", False)], tom="perigo")
             if resp is None:
                 return
             if resp is False:
                 ja = {e["doc"] for e, _ in repetidos}
                 validos = [e for e in validos if e["doc"] not in ja]
                 if not validos:
-                    messagebox.showinfo("Enviar", "Todos os selecionados já receberam este extrato.")
+                    Modal.informar(self, "Enviar", "Todos os selecionados já receberam este extrato.")
                     return
 
         rotulo_rem = remetente or ef.remetente_padrao(self.cfg) or "e-mail logado no Outlook"
@@ -394,22 +478,26 @@ class App:
         if remetente and self.metodo == "outlook":
             texto += ("\n\nComo há remetente definido, o primeiro e-mail será verificado antes "
                       "de continuar (cerca de 20 s).")
-        if not messagebox.askyesno("Confirmar envio", texto):
+        if not Modal.confirmar(self, "Confirmar envio", texto, "Enviar", tom="info"):
             return
 
         self.prefs.update({self.chave_cco: cco, "intervalo": f"{intervalo:g}"})
         salvar_prefs(self.prefs)
         self.enviando = True
         self.parar.clear()
-        self.btn_enviar.configure(state="disabled")
-        self.btn_parar.configure(state="normal")
+        self.btn_enviar.setEnabled(False)
+        self.btn_parar.setEnabled(True)
+        self.concluidos = set()
+        self.progresso.setRange(0, len(validos))
+        self.progresso.setValue(0)
+        self.texto_progresso.setText(f"0 de {len(validos)} processados")
         envios = [dict(e) for e in validos]  # cópia: marcações de recusa não afetam a lista
         threading.Thread(target=self._enviar_thread, args=(envios, remetente, cco, intervalo),
                          daemon=True).start()
 
     def parar_envio(self):
         self.parar.set()
-        self.btn_parar.configure(state="disabled")
+        self.btn_parar.setEnabled(False)
         self.escrever_log("Parando após o envio atual...")
 
     def _aguardar_recusas(self, inicio, envios, espera) -> bool:
@@ -485,14 +573,24 @@ class App:
             recusados = sum(1 for e in enviados if "recusado" in e)
             self.fila.put(("fim", len(enviados) - recusados, falhas + recusados, aviso))
 
+    def _marcar_status(self, doc, status, tag):
+        self.tabela.definir_celula(self.linhas[doc], COL_STATUS, Etiqueta(status, TOM_STATUS.get(tag, "neutro")))
+        self.status[doc] = tag
+        if tag in ("enviado", "erro") and doc not in self.concluidos:
+            self.concluidos.add(doc)
+            self.progresso.setValue(len(self.concluidos))
+            self.texto_progresso.setText(f"{len(self.concluidos)} de {self.progresso.maximum()} processados")
+        self._atualizar_contadores()
+
     def processar_fila(self):
+        # pausa o timer enquanto processa: as janelas de aviso abaixo rodam o loop de eventos
+        self.timer.stop()
         try:
             while True:
                 item = self.fila.get_nowait()
                 if item[0] == "status":
                     _, doc, status, tag = item
-                    self.tree.set(doc, "status", status)
-                    self.tree.item(doc, tags=(tag,))
+                    self._marcar_status(doc, status, tag)
                 elif item[0] == "log":
                     self.escrever_log(item[1])
                 elif item[0] == "atualizar":
@@ -500,20 +598,23 @@ class App:
                 elif item[0] == "fim":
                     _, ok, falhas, aviso = item
                     self.enviando = False
-                    self.btn_enviar.configure(state="normal")
-                    self.btn_parar.configure(state="disabled")
+                    self.btn_enviar.setEnabled(True)
+                    self.btn_parar.setEnabled(False)
                     self.escrever_log(f"Concluído: {ok} enviado(s), {falhas} com erro/recusado.")
                     resumo = f"{ok} e-mail(s) enviado(s)\n{falhas} com erro ou recusado(s)"
                     if aviso:
-                        messagebox.showwarning("Envio interrompido", f"{aviso}\n\n{resumo}")
+                        Modal.informar(self, "Envio interrompido", f"{aviso}\n\n{resumo}", "perigo")
                     else:
-                        messagebox.showinfo("Envio concluído", resumo)
+                        Modal.informar(self, "Envio concluído", resumo, "sucesso")
         except queue.Empty:
             pass
-        self.root.after(150, self.processar_fila)
+        finally:
+            self.timer.start(150)
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    App(root)
-    root.mainloop()
+    aplicacao = QApplication(sys.argv)
+    tema.aplicar(aplicacao)
+    janela = App()
+    janela.show()
+    sys.exit(aplicacao.exec())
