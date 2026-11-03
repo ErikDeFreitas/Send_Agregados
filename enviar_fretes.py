@@ -371,7 +371,7 @@ def montar_html(cfg, nome, doc, fretes: pd.DataFrame, periodo) -> str:
         total = f"<tr>{tds}</tr>"
 
     # cartões de resumo (quebram em linhas no celular)
-    col_total = next((c for c in colunas if c in moeda), None)
+    col_total = next((c for c in lista(p.get("colunas_moeda", "")) if c in colunas), None)
     resumo = [("CNPJ/CPF", formatar_documento(doc)), ("Fretes", str(len(fretes)))]
     if col_total:
         resumo.append(("Total", formatar_moeda(fretes[col_total].sum())))
