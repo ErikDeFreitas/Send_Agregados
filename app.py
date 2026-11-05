@@ -231,12 +231,15 @@ class App(QMainWindow):
         self.cartao_lista = Cartao("Agregados", "Selecione a planilha para começar.")
         todos = Botao("Selecionar todos", "secundario", "sm")
         self.cartao_lista.adicionar_acao(todos)
+        nenhum = Botao("Desmarcar todos", "secundario", "sm")
+        self.cartao_lista.adicionar_acao(nenhum)
 
         self.tabela = Tabela(["CNPJ/CPF", "Agregado", "Fretes", "Total", "E-mail", "Status"],
                              alinhar_direita=(2, 3), coluna_flexivel=1)
         self.tabela.setMinimumHeight(TAMANHOS["linha_tabela"] * 6 + TAMANHOS["cabecalho_tabela"])
         self.tabela.doubleClicked.connect(lambda _: self.visualizar())
         todos.clicked.connect(self.tabela.selectAll)
+        nenhum.clicked.connect(self.tabela.clearSelection)
         self.cartao_lista.corpo.addWidget(self.tabela, 1)
 
         self.progresso = BarraProgresso()
@@ -246,6 +249,9 @@ class App(QMainWindow):
         acoes.setSpacing(ESPACO["sm"])
         self.texto_progresso = Texto("", "dica")
         acoes.addWidget(self.texto_progresso, 1)
+        self.btn_limpar = Botao("Limpar", "secundario")
+        self.btn_limpar.clicked.connect(self.limpar)
+        acoes.addWidget(self.btn_limpar)
         visualizar = Botao("Visualizar e-mail", "secundario", icone="olho")
         visualizar.clicked.connect(self.visualizar)
         acoes.addWidget(visualizar)
@@ -372,6 +378,25 @@ class App(QMainWindow):
         self.progresso.setValue(0)
         self.texto_progresso.setText("")
         self.escrever_log(f"Planilha carregada: {caminho} ({len(envios)} agregados)")
+
+    def limpar(self):
+        """Volta a tela ao estado de quando o programa abre."""
+        if self.enviando:
+            Modal.informar(self, "Limpar", "Aguarde o fim do envio (ou clique em Parar) antes de limpar.")
+            return
+        self.campo_planilha.clear()
+        self.campo_cco.setText(self.prefs.get(self.chave_cco, ef.cco_padrao(self.cfg)))
+        self.campo_intervalo.setText(str(
+            self.prefs.get("intervalo", self.cfg["email"].get("intervalo_segundos", "5"))))
+        self.tabela.setRowCount(0)
+        self.envios, self.linhas, self.status = {}, {}, {}
+        self.concluidos = set()
+        self.cartao_lista.definir_subtitulo("Selecione a planilha para começar.")
+        for indicador in (self.ind_agregados, self.ind_sem_email, self.ind_enviados, self.ind_erros):
+            indicador.definir_valor("–")
+        self.progresso.setValue(0)
+        self.texto_progresso.setText("")
+        self.log.clear()
 
     def _selecionar_linha(self, linha):
         """Acrescenta a linha à seleção (selectRow trocaria a seleção inteira)."""
