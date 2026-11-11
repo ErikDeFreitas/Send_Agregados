@@ -122,6 +122,31 @@ class CampoTexto(QLineEdit):
         self.setFixedHeight(TAMANHOS["campo"])
 
 
+class CampoSenha(CampoTexto):
+    """Campo de senha com botão de olho no fim para mostrar/ocultar o que foi digitado."""
+
+    def __init__(self, placeholder: str = "", parent=None):
+        super().__init__(placeholder, parent)
+        self.setEchoMode(QLineEdit.Password)
+        self.acao_ver = self.addAction(icons.icone("olho", "#000"), QLineEdit.TrailingPosition)
+        self.acao_ver.triggered.connect(self.alternar)
+        tema.mudou.connect(self._pintar_icone)
+        self._pintar_icone()
+
+    def visivel(self) -> bool:
+        return self.echoMode() == QLineEdit.Normal
+
+    def alternar(self):
+        self.setEchoMode(QLineEdit.Password if self.visivel() else QLineEdit.Normal)
+        self._pintar_icone()
+
+    def _pintar_icone(self, *_):
+        visivel = self.visivel()
+        self.acao_ver.setIcon(icons.icone("olho_fechado" if visivel else "olho",
+                                          tema.tokens()["texto_suave"], TAMANHOS["icone"]))
+        self.acao_ver.setToolTip("Ocultar senha" if visivel else "Mostrar senha")
+
+
 class CampoPesquisa(CampoTexto):
     def __init__(self, placeholder: str = "Pesquisar...", parent=None):
         super().__init__(placeholder, parent)

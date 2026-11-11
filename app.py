@@ -15,14 +15,14 @@ from pathlib import Path
 from PySide6.QtCore import QItemSelectionModel, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QGridLayout, QHBoxLayout, QLineEdit, QMainWindow, QVBoxLayout, QWidget,
+    QApplication, QFileDialog, QGridLayout, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget,
 )
 
 import atualizador
 import enviar_fretes as ef
 from design_system import icons
 from design_system.components import (
-    AreaLog, BarraLateral, BarraProgresso, Botao, BotaoTema, Cabecalho, Campo, CampoTexto, Cartao,
+    AreaLog, BarraLateral, BarraProgresso, Botao, BotaoTema, Cabecalho, Campo, CampoSenha, CampoTexto, Cartao,
     CartaoIndicador, Etiqueta, GradeResponsiva, Modal, Pagina, Tabela, Texto,
 )
 from design_system.themes import ESPACO, MARCA, TAMANHOS, tema
@@ -59,8 +59,7 @@ class DialogoCredenciais(Modal):
         self.cfg, self.salvo = cfg, False
         self.campo_usuario = CampoTexto("envios@empresa.com.br")
         self.campo_usuario.setText(os.environ.get("SMTP_USUARIO", ""))
-        self.campo_senha = CampoTexto()
-        self.campo_senha.setEchoMode(QLineEdit.Password)
+        self.campo_senha = CampoSenha()
         self.campo_cco = CampoTexto()
         self.campo_cco.setText(ef.cco_padrao(cfg))
         self.corpo.addSpacing(ESPACO["sm"])
