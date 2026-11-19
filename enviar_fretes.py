@@ -247,10 +247,31 @@ def testar_login(cfg, usuario: str, senha: str):
         pass
 
 
+def atualizar_config_embutido(caminho: Path):
+    """No .exe: cria o config.ini na 1ª execução e o substitui pelo embutido quando a versão muda
+    (o anterior fica em config.ini.bak). Assim colunas novas valem logo após a atualização."""
+    from versao import VERSAO
+    marca = caminho.with_name("config.versao")
+    try:
+        versao_local = marca.read_text(encoding="utf-8").strip()
+    except OSError:
+        versao_local = ""
+    if caminho.exists() and versao_local == VERSAO:
+        return
+    try:
+        if caminho.exists():
+            shutil.copy2(caminho, caminho.with_name("config.ini.bak"))
+        shutil.copy(Path(sys._MEIPASS) / "config.ini", caminho)
+        marca.write_text(VERSAO, encoding="utf-8")
+    except OSError:
+        pass  # sem permissão: segue com o config.ini que já existe
+
+
 def carregar_config(caminho=None) -> configparser.ConfigParser:
     caminho = Path(caminho or ARQUIVO_CONFIG)
-    if not caminho.exists() and getattr(sys, "frozen", False):
-        # primeira execução do .exe: cria o config.ini padrão ao lado do executável
+    if getattr(sys, "frozen", False) and caminho == ARQUIVO_CONFIG:
+        atualizar_config_embutido(caminho)
+    elif not caminho.exists() and getattr(sys, "frozen", False):
         shutil.copy(Path(sys._MEIPASS) / "config.ini", caminho)
     carregar_env()
     cfg = configparser.ConfigParser(interpolation=None)
