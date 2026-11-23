@@ -4,7 +4,6 @@ import html
 import json
 import os
 import queue
-import sys
 import tempfile
 import threading
 import time
@@ -14,21 +13,18 @@ from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QTimer
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QGridLayout, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget,
+from PySide6.QtWidgets import QApplication, QFileDialog, QGridLayout, QHBoxLayout, QWidget
+from tcm_ui.components import (
+    AreaLog, BarraProgresso, Botao, Campo, CampoSenha, CampoTexto, Cartao, CartaoIndicador, Etiqueta,
+    GradeResponsiva, Modal, Pagina, Tabela, Texto,
 )
+from tcm_ui.modulo import Contexto
+from tcm_ui.themes import ESPACO, MARCA, TAMANHOS
 
-import atualizador
-import enviar_fretes as ef
-from design_system import icons
-from design_system.components import (
-    AreaLog, BarraLateral, BarraProgresso, Botao, BotaoTema, Cabecalho, Campo, CampoSenha, CampoTexto, Cartao,
-    CartaoIndicador, Etiqueta, GradeResponsiva, Modal, Pagina, Tabela, Texto,
-)
-from design_system.themes import ESPACO, MARCA, TAMANHOS, tema
-from versao import VERSAO
+from robo_agregado import dados
+from robo_agregado import enviar_fretes as ef
 
-ARQUIVO_PREFS = ef.PASTA / "preferencias.json"
+ARQUIVO_PREFS = dados.PASTA / "preferencias.json"
 
 # coluna "Status" da lista e tom da etiqueta para cada marcação usada pela thread de envio
 COL_EMAIL, COL_STATUS = 4, 5
@@ -116,9 +112,12 @@ class DialogoCredenciais(Modal):
         self.accept()
 
 
-class App(QMainWindow):
-    def __init__(self):
+class TelaExtrato(Pagina):
+    """Página do Extrato de fretes (o antigo App sem janela, barra lateral e cabeçalho)."""
+
+    def __init__(self, contexto: Contexto):
         super().__init__()
+        self.contexto = contexto
         self.cfg = ef.carregar_config()
         self.prefs = ler_prefs()
         self.envios = {}
@@ -133,55 +132,20 @@ class App(QMainWindow):
         self.metodo = self.cfg["email"].get("metodo", "outlook").strip().lower()
         self.chave_cco = f"cco_{self.metodo}"
 
-        self.setWindowTitle(f"RoboAgregado - Extrato de Fretes (v{VERSAO})")
-        self.setWindowIcon(icons.icone("caminhao", MARCA["primaria"], 32))
-        self.resize(1200, 820)
-        self.setMinimumSize(900, 600)
-
-        barra = BarraLateral("RoboAgregado")
-        barra.adicionar_item("extrato", "Extrato de fretes", "enviar")
-        if self.metodo == "smtp":
-            credenciais = Botao("Credenciais...", "secundario", icone="chave")
-            credenciais.clicked.connect(self.pedir_credenciais)
-            barra.adicionar_rodape(credenciais)
-        pasta = Botao("Pasta de dados", "secundario", icone="pasta")
-        pasta.clicked.connect(lambda: os.startfile(ef.PASTA))
-        barra.adicionar_rodape(pasta)
-        barra.adicionar_rodape(Texto(f"Versão {VERSAO}", "dica"))
-
-        cabecalho = Cabecalho("Extrato de fretes", "Envio dos extratos semanais aos agregados")
-        cabecalho.adicionar(BotaoTema())
-
-        pagina = Pagina()
-        pagina.conteudo.addWidget(self._indicadores())
-        pagina.conteudo.addWidget(self._cartao_configuracao())
-        pagina.conteudo.addWidget(self._cartao_agregados(), 1)
+        self.conteudo.addWidget(self._indicadores())
+        self.conteudo.addWidget(self._cartao_configuracao())
+        self.conteudo.addWidget(self._cartao_agregados(), 1)
         registro = Cartao("Registro")
         self.log = AreaLog()
         self.log.setFixedHeight(150)
         registro.corpo.addWidget(self.log)
-        pagina.conteudo.addWidget(registro)
-
-        direita = QVBoxLayout()
-        direita.setContentsMargins(0, 0, 0, 0)
-        direita.setSpacing(0)
-        direita.addWidget(cabecalho)
-        direita.addWidget(pagina, 1)
-        raiz = QHBoxLayout()
-        raiz.setContentsMargins(0, 0, 0, 0)
-        raiz.setSpacing(0)
-        raiz.addWidget(barra)
-        raiz.addLayout(direita, 1)
-        central = QWidget()
-        central.setLayout(raiz)
-        self.setCentralWidget(central)
+        self.conteudo.addWidget(registro)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.processar_fila)
         self.timer.start(150)
         if self.metodo == "smtp" and not ef.credenciais_ok():
             QTimer.singleShot(300, self.pedir_credenciais)  # primeira execução
-        QTimer.singleShot(1000, self.verificar_atualizacao)
 
     # -------------------------------------------------------------- montagem da tela
 
@@ -263,51 +227,6 @@ class App(QMainWindow):
         acoes.addWidget(self.btn_enviar)
         self.cartao_lista.corpo.addLayout(acoes)
         return self.cartao_lista
-
-    # -------------------------------------------------------------- atualização
-
-    def verificar_atualizacao(self):
-        """Ao abrir, procura uma Release mais nova no GitHub (só no executável, em segundo plano)."""
-        if not getattr(sys, "frozen", False):
-            return
-        cfg = self.cfg["atualizacao"] if self.cfg.has_section("atualizacao") else {}
-        if str(cfg.get("ativo", "sim")).strip().lower() not in ("sim", "s", "true", "1"):
-            return
-        atualizador.limpar_temporarios()
-        repositorio = str(cfg.get("repositorio", "ErikDeFreitas/Send_Agregados")).strip()
-        threading.Thread(target=self._atualizar_thread, args=(repositorio,), daemon=True).start()
-
-    def _atualizar_thread(self, repositorio):
-        try:
-            info = atualizador.buscar_atualizacao(repositorio)
-            if not info:
-                return
-            self.fila.put(("log", f"Nova versão {info['versao']} encontrada. Baixando..."))
-            novo = Path(sys.executable)
-            novo = novo.with_name(novo.name + ".novo")
-            atualizador.baixar_e_verificar(info, novo)
-            self.fila.put(("atualizar", info["versao"], str(novo)))
-        except atualizador.ErroAtualizacao as e:
-            self.fila.put(("log", f"Atualização automática não realizada: {e}"))
-        except Exception as e:
-            self.fila.put(("log", f"Atualização automática não realizada ({type(e).__name__})."))
-
-    def _aplicar_atualizacao(self, versao, caminho):
-        novo = Path(caminho)
-        if self.enviando:  # nunca troca o programa no meio de um envio
-            novo.unlink(missing_ok=True)
-            self.escrever_log("Atualização adiada: há um envio em andamento. Será tentada na próxima abertura.")
-            return
-        Modal.informar(self, "Atualização", f"Nova versão {versao} instalada.\n"
-                                            "O programa será reiniciado agora.", "sucesso")
-        try:
-            atualizador.aplicar_e_reiniciar(novo)
-        except atualizador.ErroAtualizacao as e:
-            novo.unlink(missing_ok=True)
-            Modal.informar(self, "Atualização", f"{e}\nO programa continuará na versão atual.", "perigo")
-            return
-        self.close()
-        os._exit(0)
 
     # -------------------------------------------------------------- ações
 
@@ -565,6 +484,8 @@ class App(QMainWindow):
                     enviados.append(e)
                 except Exception as erro:
                     if not isinstance(erro, ef.ErroEnvio):  # nunca exibe detalhes internos
+                        self.contexto.log.exception("Erro inesperado ao enviar para %s",
+                                                        ef.mascarar_documento(e["doc"]))
                         erro = ef.ErroEnvio(f"Erro inesperado ({type(erro).__name__}).")
                     ef.registrar_log(e["doc"], e["nome"], e["email"], f"ERRO: {erro}", e["assunto"])
                     self.fila.put(("status", e["doc"], "Erro", "erro"))
@@ -617,8 +538,6 @@ class App(QMainWindow):
                     self._marcar_status(doc, status, tag)
                 elif item[0] == "log":
                     self.escrever_log(item[1])
-                elif item[0] == "atualizar":
-                    self._aplicar_atualizacao(item[1], item[2])
                 elif item[0] == "fim":
                     _, ok, falhas, aviso = item
                     self.enviando = False
@@ -634,11 +553,3 @@ class App(QMainWindow):
             pass
         finally:
             self.timer.start(150)
-
-
-if __name__ == "__main__":
-    aplicacao = QApplication(sys.argv)
-    tema.aplicar(aplicacao)
-    janela = App()
-    janela.show()
-    sys.exit(aplicacao.exec())

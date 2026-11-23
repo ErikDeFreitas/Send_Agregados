@@ -2,10 +2,10 @@
 Envia a cada agregado um e-mail com apenas os seus fretes, a partir da planilha.
 
 Este arquivo contém o núcleo do sistema (usado pelo app.py) e também funciona por linha de comando:
-    python enviar_fretes.py --planilha "C:\\...\\Modelo.xlsx" --listar
-    python enviar_fretes.py --cnpj 12.345.678/0001-90      # pré-visualiza (não envia)
-    python enviar_fretes.py --cnpj 12345678000190 --enviar # envia para um agregado
-    python enviar_fretes.py --todos --enviar               # envia para todos
+    python -m robo_agregado.enviar_fretes --planilha "C:\\...\\Modelo.xlsx" --listar
+    python -m robo_agregado.enviar_fretes --cnpj 12.345.678/0001-90      # pré-visualiza (não envia)
+    python -m robo_agregado.enviar_fretes --cnpj 12345678000190 --enviar # envia para um agregado
+    python -m robo_agregado.enviar_fretes --todos --enviar               # envia para todos
 """
 
 import argparse
@@ -15,7 +15,6 @@ import hashlib
 import html
 import os
 import re
-import shutil
 import smtplib
 import ssl
 import subprocess
@@ -29,21 +28,9 @@ from pathlib import Path
 
 import pandas as pd
 
-# no executável, config, .env e log ficam numa pasta própria (não soltos ao lado do .exe)
-NOME_PASTA_DADOS = "RoboAgregado"
-if getattr(sys, "frozen", False):
-    PASTA = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / NOME_PASTA_DADOS
-    PASTA.mkdir(parents=True, exist_ok=True)
-    # versões antigas gravavam estes arquivos ao lado do .exe: leva para a pasta nova
-    for _nome in (".env", "log_envios.csv", "preferencias.json"):
-        _antigo = Path(sys.executable).resolve().parent / _nome
-        if _antigo.is_file() and not (PASTA / _nome).exists():
-            try:
-                shutil.move(str(_antigo), str(PASTA / _nome))
-            except OSError:
-                pass
-else:
-    PASTA = Path(__file__).resolve().parent
+from robo_agregado import dados
+
+PASTA = dados.PASTA
 PASTA_PREVIA = PASTA / "previas"
 ARQUIVO_LOG = PASTA / "log_envios.csv"
 ARQUIVO_CONFIG = PASTA / "config.ini"
@@ -247,32 +234,10 @@ def testar_login(cfg, usuario: str, senha: str):
         pass
 
 
-def atualizar_config_embutido(caminho: Path):
-    """No .exe: cria o config.ini na 1ª execução e o substitui pelo embutido quando a versão muda
-    (o anterior fica em config.ini.bak). Assim colunas novas valem logo após a atualização."""
-    from versao import VERSAO
-    marca = caminho.with_name("config.versao")
-    try:
-        versao_local = marca.read_text(encoding="utf-8").strip()
-    except OSError:
-        versao_local = ""
-    if caminho.exists() and versao_local == VERSAO:
-        return
-    try:
-        if caminho.exists():
-            shutil.copy2(caminho, caminho.with_name("config.ini.bak"))
-        shutil.copy(Path(sys._MEIPASS) / "config.ini", caminho)
-        marca.write_text(VERSAO, encoding="utf-8")
-    except OSError:
-        pass  # sem permissão: segue com o config.ini que já existe
-
-
 def carregar_config(caminho=None) -> configparser.ConfigParser:
-    caminho = Path(caminho or ARQUIVO_CONFIG)
-    if getattr(sys, "frozen", False) and caminho == ARQUIVO_CONFIG:
-        atualizar_config_embutido(caminho)
-    elif not caminho.exists() and getattr(sys, "frozen", False):
-        shutil.copy(Path(sys._MEIPASS) / "config.ini", caminho)
+    if caminho is None or Path(caminho) == ARQUIVO_CONFIG:
+        caminho = dados.garantir_config()
+    caminho = Path(caminho)
     carregar_env()
     cfg = configparser.ConfigParser(interpolation=None)
     cfg.read(caminho, encoding="utf-8")
@@ -690,6 +655,7 @@ def main():
     ap.add_argument("--config", default=str(ARQUIVO_CONFIG))
     args = ap.parse_args()
 
+    dados.preparar_pasta()
     cfg = carregar_config(args.config)
     try:
         df, emails = carregar_dados(cfg, args.planilha)
@@ -711,7 +677,7 @@ def main():
             print("Cancelado.")
             return
 
-    PASTA_PREVIA.mkdir(exist_ok=True)
+    PASTA_PREVIA.mkdir(parents=True, exist_ok=True)
     remetente = cfg["email"].get("enviar_como", "")
     cco = cco_padrao(cfg)
     intervalo = cfg["email"].getfloat("intervalo_segundos", 5)

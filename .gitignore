@@ -25,3 +25,6 @@ log_envios_anterior_*.csv
 .vscode/
 
 claude.md
+.venv/
+*.egg-info/
+.pytest_cache/

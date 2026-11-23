@@ -1,4 +1,0 @@
-pandas
-openpyxl
-pywin32
-PySide6

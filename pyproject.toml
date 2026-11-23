@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robo-agregado"
+dynamic = ["version"]
+description = "Envio de extratos de fretes para agregados"
+requires-python = ">=3.11"
+dependencies = [
+    "tcm-ui @ git+https://github.com/ErikDeFreitas/Tcm-ui@v1.1.0",
+    "pandas",
+    "openpyxl",
+    "pywin32; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-qt"]
+
+[project.entry-points."sistema_financeiro.modulos"]
+robo_agregado = "robo_agregado.modulo:MODULO"
+
+[tool.setuptools.dynamic]
+version = {attr = "robo_agregado.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+robo_agregado = ["config.ini"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
