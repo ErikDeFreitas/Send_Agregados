@@ -2,8 +2,8 @@
 #
 # Para lançar uma versão:
 #   1. suba __version__ em src/robo_agregado/__init__.py
-#   2. git tag v2.0.0   (igual à versão)
-#   3. git push origin v2.0.0
+#   2. git tag v2.0.1   (igual à versão)
+#   3. git push origin v2.0.1
 #
 # Também dá para rodar manualmente (aba Actions > Release > Run workflow):
 # nesse caso o .exe fica só como artefato do run, sem criar Release.
@@ -29,7 +29,7 @@ jobs:
           cache: pip
 
       - name: Instalar dependências
-        run: python -m pip install . pytest pytest-qt pyinstaller
+        run: python -m pip install -r requirements.txt . pytest pytest-qt pyinstaller
 
       - name: Conferir que a tag bate com a versão
         if: startsWith(github.ref, 'refs/tags/v')

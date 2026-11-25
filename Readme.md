@@ -42,7 +42,12 @@ Para distribuir, basta o `.exe` (baixe em **Releases** no GitHub).
 ## Rodando pelo Python
 ```
 python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\pip install -e ".[dev]"
+```
+Para desenvolver junto com o `tcm-ui`, instale-o editável a partir do clone vizinho no lugar do
+`requirements.txt`: `.venv\Scripts\pip install -e ..\Tcm-ui` (depois `pip install -e ".[dev]"`).
+```
 .venv\Scripts\python main.py
 ```
 Pelo Python os dados ficam na mesma pasta do `.exe` (`%LOCALAPPDATA%\RoboAgregado`). Para usar outra
@@ -60,8 +65,8 @@ Os testes não escrevem no registro, não usam a pasta real de dados e não envi
 3. O workflow `.github/workflows/release.yml` confere que a tag bate com `__version__`, roda os testes,
    gera o `.exe` e o `.sha256` e cria a Release com os dois arquivos.
 
-Antes de criar a tag do RoboAgregado, a tag `v1.1.0` do `tcm-ui` precisa existir no GitHub (a dependência
-`tcm-ui@v1.1.0` é instalada pelo workflow; sem ela o `pip install` falha).
+O `pyproject.toml` pede `tcm-ui>=1.1.0` (faixa, para vários módulos dividirem um só `tcm-ui` na casca).
+O build e o workflow instalam `requirements.txt`, que fixa `tcm-ui@v1.3.0`; essa tag precisa existir no GitHub.
 
 Ao abrir, o executável consulta a última Release do repositório definido em `MODULO.repositorio`
 (`ErikDeFreitas/Send_Agregados`); se a versão for maior, baixa, confere o SHA-256, se substitui e reinicia sozinho.
