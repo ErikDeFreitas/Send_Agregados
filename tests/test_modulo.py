@@ -16,7 +16,7 @@ def test_entry_point_expoe_modulo():
     eps = {ep.name: ep for ep in entry_points(group="sistema_financeiro.modulos")}
     modulo = eps["robo_agregado"].load()
     assert (modulo.id, modulo.grupo_ad, modulo.nome_exe) == ("robo_agregado", "SF-RoboAgregado", "RoboAgregado.exe")
-    assert modulo.versao == robo_agregado.__version__ == "2.0.1"
+    assert modulo.versao == robo_agregado.__version__ == "2.1.0"
     assert [p.chave for p in modulo.paginas] == ["extrato"]
     assert modulo.aplicacao_settings == "RoboAgregado"
 

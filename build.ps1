@@ -14,6 +14,7 @@ $antes = if (Test-Path $exe) { (Get-Item $exe).LastWriteTime } else { [datetime]
 & $Python -m PyInstaller --noconfirm --onefile --windowed --name $nome `
     --collect-data tcm_ui --collect-data robo_agregado `
     --hidden-import openpyxl --hidden-import pythoncom --hidden-import win32com.client `
+    --hidden-import msal --hidden-import msal_extensions `
     --exclude-module matplotlib --exclude-module scipy --exclude-module IPython --exclude-module tkinter `
     --workpath build --specpath build --distpath dist main.py
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exe) -or (Get-Item $exe).LastWriteTime -le $antes) {

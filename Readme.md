@@ -23,18 +23,24 @@ gerar_planilha_exemplo.py    cria uma planilha fictícia para testar
 
 ## Usando o executável
 1. Abra `RoboAgregado.exe` (pode ficar em qualquer pasta; não precisa instalar nada).
-2. Na primeira abertura, informe o **e-mail remetente**, a **senha** e o **CCO padrão** (cópia oculta,
-   opcional). O botão **Credenciais...** altera depois. Ficam só no arquivo `.env` deste computador.
+2. Na primeira abertura, clique em **Entrar com a Microsoft** e entre com a **sua própria conta** (o login
+   acontece no navegador; nenhuma senha fica salva no programa). Em **Enviar como**, informe a caixa que
+   deve aparecer como remetente (ex.: a do financeiro), ou deixe vazio para enviar como você. O botão
+   **Conta de envio...** altera depois. O login é o mesmo dos outros sistemas da TCM que enviam e-mail.
+   Para enviar como outra caixa, a TI precisa dar à sua conta a permissão **"Enviar como"** nessa caixa;
+   sem ela, o envio para no primeiro e-mail e avisa.
 3. Clique em **Selecionar planilha...** e escolha a planilha (abas de fretes + `Emails`).
 4. Selecione os agregados (todos com e-mail já vêm marcados). Dê dois cliques ou use
    **Visualizar e-mail** para ver o e-mail no navegador.
-5. Clique em **Enviar selecionados** e confirme. O remetente é sempre o das credenciais.
+5. Clique em **Enviar selecionados** e confirme. A confirmação mostra o remetente ("Enviar como" ou a sua
+   conta). Se a sessão Microsoft expirar no meio do envio, ele para e a janela **Conta de envio** abre.
 
 Os arquivos do programa ficam em `%LOCALAPPDATA%\RoboAgregado` (botão **Pasta de dados**), não ao lado do `.exe`:
 - `config.ini`: colunas, assunto, assinatura (criado na primeira execução).
-- `.env`: remetente, senha e CCO.
+- `.env`: só nas versões até a 2.0.1 (remetente, senha e CCO). A 2.1.0 leva o CCO e o remetente para
+  `preferencias.json` e apaga o `.env` (e a senha) na primeira abertura.
 - `log_envios.csv`: histórico de envios.
-- `preferencias.json`: lembra a última planilha, o CCO e o intervalo.
+- `preferencias.json`: lembra a última planilha, o CCO, o "Enviar como" e o intervalo.
 - `logs\robo_agregado.log`: log de erros do programa.
 
 Para distribuir, basta o `.exe` (baixe em **Releases** no GitHub).

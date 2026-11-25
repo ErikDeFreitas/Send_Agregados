@@ -31,9 +31,9 @@ def test_pagina_desconhecida(inst):
         inst.widget("outra")
 
 
-def test_acoes_smtp(inst):  # config padrão tem metodo = smtp
+def test_acoes_microsoft(inst):  # config padrão tem metodo = microsoft
     inst.widget("extrato")
-    assert textos(inst.acoes_cabecalho("extrato")) == ["Credenciais...", "Pasta de dados"]
+    assert textos(inst.acoes_cabecalho("extrato")) == ["Conta de envio...", "Pasta de dados"]
 
 
 def test_acoes_outlook(inst, monkeypatch):

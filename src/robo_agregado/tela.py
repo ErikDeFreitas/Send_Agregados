@@ -1,8 +1,7 @@
 """Tela do Extrato de Fretes: escolhe a planilha, confere os agregados e envia os e-mails."""
 
 import html
-import json
-import os
+from collections.abc import Callable
 import queue
 import tempfile
 import threading
@@ -13,103 +12,68 @@ from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QTimer
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QApplication, QFileDialog, QGridLayout, QHBoxLayout, QWidget
+from PySide6.QtWidgets import QFileDialog, QGridLayout, QHBoxLayout, QWidget
 from tcm_ui.components import (
-    AreaLog, BarraProgresso, Botao, Campo, CampoSenha, CampoTexto, Cartao, CartaoIndicador, Etiqueta,
+    AreaLog, BarraProgresso, Botao, Campo, CampoTexto, Cartao, CartaoIndicador, Etiqueta,
     GradeResponsiva, Modal, Pagina, Tabela, Texto,
 )
+from tcm_ui import microsoft
+from tcm_ui.microsoft_ui import CartaoContaMicrosoft
 from tcm_ui.modulo import Contexto
 from tcm_ui.themes import ESPACO, MARCA, TAMANHOS
 
-from robo_agregado import dados
 from robo_agregado import enviar_fretes as ef
 
-ARQUIVO_PREFS = dados.PASTA / "preferencias.json"
+FABRICA_CONTA: Callable = microsoft.Conta  # os testes trocam por uma conta falsa
 
 # coluna "Status" da lista e tom da etiqueta para cada marcação usada pela thread de envio
 COL_EMAIL, COL_STATUS = 4, 5
 TOM_STATUS = {"": "primaria", "enviado": "sucesso", "erro": "perigo"}
 
 
-def ler_prefs() -> dict:
-    try:
-        return json.loads(ARQUIVO_PREFS.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+class DialogoContaEnvio(Modal):
+    """Conta Microsoft da pessoa (login no navegador) e o "Enviar como" (opcional)."""
 
-
-def salvar_prefs(prefs: dict):
-    try:
-        ARQUIVO_PREFS.write_text(json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8")
-    except OSError:
-        pass
-
-
-class DialogoCredenciais(Modal):
-    """Pede usuário e senha do remetente, testa o login e grava no .env."""
-
-    def __init__(self, pai, cfg):
-        super().__init__("Credenciais do remetente",
-                         "Informe o e-mail remetente e a senha da conta que enviará os extratos. "
-                         "Os dados ficam salvos só neste computador (arquivo .env).", pai)
-        self.cfg, self.salvo = cfg, False
-        self.campo_usuario = CampoTexto("envios@empresa.com.br")
-        self.campo_usuario.setText(os.environ.get("SMTP_USUARIO", ""))
-        self.campo_senha = CampoSenha()
-        self.campo_cco = CampoTexto()
-        self.campo_cco.setText(ef.cco_padrao(cfg))
-        self.corpo.addSpacing(ESPACO["sm"])
-        self.corpo.addWidget(Campo("E-mail", self.campo_usuario))
-        self.corpo.addWidget(Campo("Senha", self.campo_senha))
-        self.corpo.addWidget(Campo("CCO padrão", self.campo_cco, "Cópia oculta, opcional; vários separados por ;"))
-        self.msg = Texto("", "erro")
-        self.msg.setWordWrap(True)
-        self.msg.hide()
-        self.corpo.addWidget(self.msg)
+    def __init__(self, pai, conta, enviar_como: str, *, aviso_sem_conta: str = "", sessao_expirada: bool = False):
+        super().__init__("Conta de envio",
+                         "Entre com a sua conta Microsoft. Para enviar como a caixa do financeiro, informe o "
+                         "endereço em \"Enviar como\": a TI precisa dar essa permissão à sua conta.", pai, "info")
+        self.resultado: str | None = None
+        self.cartao = CartaoContaMicrosoft(conta, aviso_sem_conta=aviso_sem_conta, sessao_expirada=sessao_expirada)
+        self.corpo.addWidget(self.cartao)
+        self.campo_enviar_como = CampoTexto("vazio = enviar como a sua própria conta")
+        self.campo_enviar_como.setText(enviar_como)
+        self.campo_enviar_como_field = Campo("Enviar como", self.campo_enviar_como,
+                                             "Opcional. Ex.: a caixa responsável pelos extratos.")
+        self.corpo.addWidget(self.campo_enviar_como_field)
 
         self.adicionar_botao(Botao("Cancelar", "secundario")).clicked.connect(self.reject)
-        self.btn_salvar = self.adicionar_botao(Botao("Testar e salvar"))
-        self.btn_salvar.clicked.connect(self.salvar)
-        self.btn_salvar.setDefault(True)  # Enter salva; Esc fecha (padrão do QDialog)
-        (self.campo_senha if self.campo_usuario.text() else self.campo_usuario).setFocus()
+        self.botao_salvar = self.adicionar_botao(Botao("Salvar", "primario"))
+        self.botao_salvar.setDefault(True)  # Enter salva; Esc fecha (padrão do QDialog)
+        self.botao_salvar.clicked.connect(self._salvar)
+        self.cartao.mudou.connect(self._atualizar)
+        self._atualizar()
 
-    def mensagem(self, texto: str, erro: bool = True):
-        self.msg.setProperty("papel", "erro" if erro else "suave")
-        self.msg.style().unpolish(self.msg)
-        self.msg.style().polish(self.msg)
-        self.msg.setText(texto)
-        self.msg.show()
+    def _atualizar(self) -> None:
+        self.botao_salvar.setEnabled(bool(self.cartao.email()))
+        if self.isVisible():  # antes de exibir, o showEvent já calcula a altura
+            self.reajustar_altura()
 
-    def salvar(self):
-        usuario, senha = self.campo_usuario.text().strip(), self.campo_senha.text()
-        cco = self.campo_cco.text().strip()
-        if ef.emails_invalidos(usuario) or not usuario:
-            self.mensagem("Informe um e-mail válido.")
+    def _salvar(self) -> None:
+        if not self.cartao.email():
             return
-        if not senha:
-            self.mensagem("Informe a senha.")
+        valor = self.campo_enviar_como.text().strip()
+        if valor and (" " in valor or ";" in valor or ef.emails_invalidos(valor)):
+            self.campo_enviar_como_field.definir_erro("Informe um único e-mail válido, ou deixe vazio.")
+            self._atualizar()
             return
-        if ef.emails_invalidos(cco):
-            self.mensagem(f"CCO inválido: {', '.join(ef.emails_invalidos(cco))}")
-            return
-        self.mensagem("Testando o login no servidor...", erro=False)
-        self.btn_salvar.setEnabled(False)
-        QApplication.processEvents()
-        try:
-            ef.testar_login(self.cfg, usuario, senha)
-        except ef.ErroEnvio as e:
-            self.mensagem(str(e))
-            self.btn_salvar.setEnabled(True)
-            return
-        try:
-            ef.salvar_env(usuario, senha, cco)
-        except OSError:
-            self.mensagem("Não foi possível gravar o arquivo .env nesta pasta. "
-                          "Verifique a permissão de escrita na pasta de dados do programa.")
-            self.btn_salvar.setEnabled(True)
-            return
-        self.salvo = True
+        self.campo_enviar_como_field.definir_erro(None)
+        self.resultado = valor
         self.accept()
+
+    def done(self, r: int) -> None:
+        self.cartao.abandonar_login()  # X, Cancelar ou Esc fecham mesmo com o login aberto no navegador
+        super().done(r)
 
 
 class TelaExtrato(Pagina):
@@ -119,7 +83,9 @@ class TelaExtrato(Pagina):
         super().__init__()
         self.contexto = contexto
         self.cfg = ef.carregar_config()
-        self.prefs = ler_prefs()
+        self.prefs = ef.ler_prefs()
+        if ef.migrar_env(self.prefs):  # versões com senha: o .env (e a senha) somem; CCO e remetente ficam
+            ef.salvar_prefs(self.prefs)
         self.envios = {}
         self.linhas = {}  # doc -> linha da tabela
         self.status = {}  # doc -> marcação atual ("", "enviado", "erro")
@@ -128,9 +94,12 @@ class TelaExtrato(Pagina):
         self.enviando = False
         self.parar = threading.Event()
 
-        # o remetente vem das credenciais (.env); só o método Outlook usa o enviar_como do config.ini
-        self.metodo = self.cfg["email"].get("metodo", "outlook").strip().lower()
+        # microsoft: conta da pessoa + "Enviar como" das preferências; outlook: enviar_como do config.ini
+        self.metodo = ef.metodo_envio(self.cfg)
         self.chave_cco = f"cco_{self.metodo}"
+        self.conta = None
+        self._aviso_conta = ""
+        self._sessao_expirada = False
 
         self.conteudo.addWidget(self._indicadores())
         self.conteudo.addWidget(self._cartao_configuracao())
@@ -144,8 +113,9 @@ class TelaExtrato(Pagina):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.processar_fila)
         self.timer.start(150)
-        if self.metodo == "smtp" and not ef.credenciais_ok():
-            QTimer.singleShot(300, self.pedir_credenciais)  # primeira execução
+        if self.metodo == "microsoft":  # o MSAL consulta a rede ao ser criado: fora da thread da interface
+            microsoft.criar_conta_em_segundo_plano(self, contexto.log, self._conta_pronta,
+                                                   fabrica=lambda: FABRICA_CONTA())
 
     # -------------------------------------------------------------- montagem da tela
 
@@ -230,13 +200,35 @@ class TelaExtrato(Pagina):
 
     # -------------------------------------------------------------- ações
 
-    def pedir_credenciais(self) -> bool:
-        dialogo = DialogoCredenciais(self, self.cfg)
+    def _conta_pronta(self, conta, aviso: str) -> None:
+        self.conta, self._aviso_conta = conta, aviso
+        email = conta.email() if conta is not None else None
+        if email:
+            self.escrever_log(f"Conta de envio: {email} (enviando como {self.remetente()}).")
+        elif conta is None:  # sem internet: nada modal (a casca e a verificação do .exe não podem travar)
+            self.escrever_log(f"{aviso} O diálogo \"Conta de envio...\" tenta de novo ao abrir.")
+        else:
+            QTimer.singleShot(0, self.pedir_conta)  # primeira execução: ainda não entrou com a Microsoft
+
+    def remetente(self) -> str:
+        """Quem aparece como remetente no método microsoft: o "Enviar como" ou a própria conta."""
+        email = self.conta.email() if self.conta is not None else None
+        return self.prefs.get("enviar_como", "") or email or ""
+
+    def pedir_conta(self, sessao_expirada: bool = False) -> bool:
+        """Abre "Conta de envio"; True se a pessoa salvou (só é possível com a conta conectada)."""
+        if self.conta is None and self._aviso_conta and self.metodo == "microsoft":
+            # a conta não chegou (ex.: estava sem internet): tenta criar de novo antes de mostrar o motivo
+            self.conta, self._aviso_conta = microsoft.criar_conta(self.contexto.log, lambda: FABRICA_CONTA())
+        dialogo = DialogoContaEnvio(self, self.conta, self.prefs.get("enviar_como", ""),
+                                    aviso_sem_conta=self._aviso_conta, sessao_expirada=sessao_expirada)
         dialogo.exec()
-        if dialogo.salvo:
-            self.campo_cco.setText(os.environ.get("EMAIL_CCO", ""))
-            self.escrever_log(f"Credenciais salvas para {os.environ.get('SMTP_USUARIO')}.")
-        return dialogo.salvo
+        if dialogo.resultado is None:
+            return False
+        self.prefs["enviar_como"] = dialogo.resultado
+        ef.salvar_prefs(self.prefs)
+        self.escrever_log(f"Conta de envio: {dialogo.cartao.email()} (enviando como {self.remetente()}).")
+        return True
 
     def escrever_log(self, texto):
         self.log.escrever(texto)
@@ -267,7 +259,7 @@ class TelaExtrato(Pagina):
 
         self.campo_planilha.setText(caminho)
         self.prefs["planilha"] = caminho
-        salvar_prefs(self.prefs)
+        ef.salvar_prefs(self.prefs)
         self.tabela.setRowCount(0)
         self.envios = {e["doc"]: e for e in envios}
         self.linhas, self.status = {}, {}
@@ -354,7 +346,7 @@ class TelaExtrato(Pagina):
     def enviar_selecionados(self):
         if self.enviando:
             return
-        if self.metodo == "smtp" and not ef.credenciais_ok() and not self.pedir_credenciais():
+        if self.metodo == "microsoft" and not (self.conta and self.conta.email()) and not self.pedir_conta():
             return
         selecionados = [self.envios[d] for d in self._selecionados()]
         if not selecionados:
@@ -366,7 +358,10 @@ class TelaExtrato(Pagina):
             Modal.informar(self, "Enviar", "Nenhum dos selecionados tem e-mail cadastrado.", "perigo")
             return
 
-        remetente = self.cfg["email"].get("enviar_como", "").strip() if self.metodo == "outlook" else ""
+        if self.metodo == "outlook":
+            remetente = self.cfg["email"].get("enviar_como", "").strip()
+        else:
+            remetente = self.prefs.get("enviar_como", "").strip()
         cco = self.campo_cco.text().strip()
         try:
             intervalo = max(0.0, float(self.campo_intervalo.text().replace(",", ".")))
@@ -411,7 +406,7 @@ class TelaExtrato(Pagina):
                     Modal.informar(self, "Enviar", "Todos os selecionados já receberam este extrato.")
                     return
 
-        rotulo_rem = remetente or ef.remetente_padrao(self.cfg) or "e-mail logado no Outlook"
+        rotulo_rem = self.remetente() if self.metodo == "microsoft" else (remetente or "e-mail logado no Outlook")
         texto = (f"Enviar {len(validos)} e-mail(s)?\n\n"
                  f"Remetente: {rotulo_rem}\n"
                  f"Cópia oculta (CCO): {cco or '-'}\n"
@@ -425,7 +420,7 @@ class TelaExtrato(Pagina):
             return
 
         self.prefs.update({self.chave_cco: cco, "intervalo": f"{intervalo:g}"})
-        salvar_prefs(self.prefs)
+        ef.salvar_prefs(self.prefs)
         self.enviando = True
         self.parar.clear()
         self.btn_enviar.setEnabled(False)
@@ -469,7 +464,7 @@ class TelaExtrato(Pagina):
             pythoncom.CoInitialize()
         inicio = datetime.now()
         enviados, falhas, aviso = [], 0, ""
-        enviador = ef.Enviador(self.cfg)
+        enviador = ef.Enviador(self.cfg, self.conta)
         try:
             for e in envios:
                 if self.parar.is_set() or (enviados and self.parar.wait(intervalo)):
@@ -491,6 +486,8 @@ class TelaExtrato(Pagina):
                     self.fila.put(("status", e["doc"], "Erro", "erro"))
                     self.fila.put(("log", f"[ERRO] {e['nome']} -> {e['email']}: {erro}"))
                     falhas += 1
+                    if isinstance(erro, ef.ErroSessao):
+                        self.fila.put(("sessao",))
                     if isinstance(erro, ef.ErroFatal):
                         aviso = f"{erro}\n\nO envio foi interrompido, pois o erro afeta todos os e-mails."
                         break
@@ -538,6 +535,8 @@ class TelaExtrato(Pagina):
                     self._marcar_status(doc, status, tag)
                 elif item[0] == "log":
                     self.escrever_log(item[1])
+                elif item[0] == "sessao":
+                    self._sessao_expirada = True
                 elif item[0] == "fim":
                     _, ok, falhas, aviso = item
                     self.enviando = False
@@ -549,6 +548,9 @@ class TelaExtrato(Pagina):
                         Modal.informar(self, "Envio interrompido", f"{aviso}\n\n{resumo}", "perigo")
                     else:
                         Modal.informar(self, "Envio concluído", resumo, "sucesso")
+                    if self._sessao_expirada:  # a Microsoft pediu login de novo: abre "Conta de envio"
+                        self._sessao_expirada = False
+                        self.pedir_conta(sessao_expirada=True)
         except queue.Empty:
             pass
         finally:

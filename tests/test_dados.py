@@ -118,5 +118,5 @@ def test_migra_arquivos_de_ao_lado_do_exe(monkeypatch, tmp_path):
 
 def test_carregar_config_padrao_usa_pasta_de_dados():
     cfg = enviar_fretes.carregar_config()
-    assert cfg["smtp"].get("servidor")
+    assert enviar_fretes.metodo_envio(cfg) == "microsoft"
     assert (dados.PASTA / "config.ini").exists()

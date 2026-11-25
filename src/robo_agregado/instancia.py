@@ -24,10 +24,10 @@ class RoboAgregado:
 
     def acoes_cabecalho(self, chave_pagina: str) -> list[QWidget]:
         acoes = []
-        if self.tela is not None and self.tela.metodo == "smtp":
-            credenciais = Botao("Credenciais...", "secundario", icone="chave")
-            credenciais.clicked.connect(self.tela.pedir_credenciais)
-            acoes.append(credenciais)
+        if self.tela is not None and self.tela.metodo == "microsoft":
+            conta = Botao("Conta de envio...", "secundario", icone="email")
+            conta.clicked.connect(lambda: self.tela.pedir_conta())
+            acoes.append(conta)
         pasta = Botao("Pasta de dados", "secundario", icone="pasta")
         pasta.clicked.connect(self._abrir_pasta)
         acoes.append(pasta)

@@ -13,11 +13,11 @@ import configparser
 import csv
 import hashlib
 import html
-import os
+import json
+import logging
 import re
 import smtplib
 import ssl
-import subprocess
 import sys
 import time
 import unicodedata
@@ -28,13 +28,17 @@ from pathlib import Path
 
 import pandas as pd
 
+from tcm_ui import microsoft
+from tcm_ui.microsoft import ContaNaoConfigurada, FalhaLogin
+
 from robo_agregado import dados
 
 PASTA = dados.PASTA
 PASTA_PREVIA = PASTA / "previas"
 ARQUIVO_LOG = PASTA / "log_envios.csv"
 ARQUIVO_CONFIG = PASTA / "config.ini"
-ARQUIVO_ENV = PASTA / ".env"
+ARQUIVO_ENV = PASTA / ".env"  # só das versões com senha: migrar_env() o apaga
+ARQUIVO_PREFS = PASTA / "preferencias.json"
 ESPERA_RECUSAS = 20  # segundos aguardando avisos de não entrega após o envio (só Outlook)
 CABECALHO_LOG = ["data_hora", "cnpj_cpf", "nome", "email", "assunto", "status", "chave"]
 RE_EMAIL = re.compile(r"^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$")
@@ -50,6 +54,10 @@ class ErroEnvio(Exception):
 
 class ErroFatal(ErroEnvio):
     """Erro que afeta o lote inteiro (conexão, login, remetente): não adianta continuar."""
+
+
+class ErroSessao(ErroFatal):
+    """Sem conta Microsoft conectada ou sessão expirada: a pessoa precisa entrar de novo."""
 
 
 # ------------------------------------------------------------------ utilidades
@@ -165,11 +173,30 @@ def limpar_cabecalho(texto: str) -> str:
 
 # ------------------------------------------------------------------ config e planilha
 
-def carregar_env(caminho=None):
-    """Lê o .env (CHAVE=valor) para as variáveis de ambiente, sem sobrescrever as existentes."""
-    caminho = Path(caminho or ARQUIVO_ENV)
-    if not caminho.is_file():
-        return
+def ler_prefs() -> dict:
+    try:
+        return json.loads(ARQUIVO_PREFS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def salvar_prefs(prefs: dict):
+    try:
+        ARQUIVO_PREFS.write_text(json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+MSG_SEM_CONTA = "Entre com a Microsoft em 'Conta de envio...'."
+
+
+def metodo_envio(cfg) -> str:
+    """'outlook' (Outlook instalado) ou 'microsoft' (login da própria pessoa). O antigo 'smtp' com senha vira 'microsoft'."""
+    return "outlook" if cfg["email"].get("metodo", "").strip().lower() == "outlook" else "microsoft"
+
+
+def _ler_env(caminho: Path) -> dict:
+    valores = {}
     for linha in caminho.read_text(encoding="utf-8-sig").splitlines():
         linha = linha.strip()
         if not linha or linha.startswith("#") or "=" not in linha:
@@ -178,67 +205,43 @@ def carregar_env(caminho=None):
         valor = valor.strip()
         if len(valor) >= 2 and valor[0] == valor[-1] and valor[0] in "\"'":
             valor = valor[1:-1]
-        os.environ.setdefault(chave.strip(), valor)
+        valores[chave.strip()] = valor
+    return valores
 
 
-def credenciais_ok() -> bool:
-    return bool(os.environ.get("SMTP_USUARIO") and os.environ.get("SMTP_SENHA"))
+def migrar_env(prefs: dict, caminho: Path | None = None) -> bool:
+    """Leva o CCO e o remetente do .env das versões com senha para as preferências e apaga o .env (e a senha).
+
+    O remetente antigo (a conta compartilhada) vira a sugestão de "Enviar como". Não mexe em os.environ.
+    """
+    caminho = Path(caminho or ARQUIVO_ENV)
+    if not caminho.is_file():
+        return False
+    try:
+        valores = _ler_env(caminho)
+    except (OSError, UnicodeDecodeError):
+        valores = {}
+    if valores.get("SMTP_USUARIO"):
+        prefs.setdefault("enviar_como", valores["SMTP_USUARIO"])
+    cco = valores.get("EMAIL_CCO") or valores.get("EMAIL_CC")
+    if cco:
+        prefs.setdefault("cco_microsoft", cco)
+    try:
+        caminho.unlink()
+    except OSError:
+        pass  # sem permissão: tenta de novo na próxima abertura
+    return True
 
 
 def cco_padrao(cfg) -> str:
-    """CCO padrão: informado na janela de credenciais (.env); o config.ini só serve de reserva."""
-    return (os.environ.get("EMAIL_CCO") or os.environ.get("EMAIL_CC")
-            or cfg["email"].get("cco", "") or cfg["email"].get("cc", ""))
-
-
-def salvar_env(usuario: str, senha: str, cco: str = ""):
-    """Grava remetente, senha e CCO padrão no .env (acesso restrito ao usuário do Windows)."""
-    ARQUIVO_ENV.write_text(
-        f'SMTP_USUARIO="{usuario}"\nSMTP_SENHA="{senha}"\nEMAIL_CCO="{cco}"\n', encoding="utf-8")
-    try:  # remove as permissões herdadas: só o usuário atual lê o arquivo
-        subprocess.run(["icacls", str(ARQUIVO_ENV), "/inheritance:r", "/grant:r",
-                        f"{os.environ.get('USERNAME', '')}:F"],
-                       capture_output=True, timeout=15, creationflags=0x08000000)
-    except (OSError, subprocess.SubprocessError):
-        pass
-    os.environ["SMTP_USUARIO"], os.environ["SMTP_SENHA"], os.environ["EMAIL_CCO"] = usuario, senha, cco
-    os.environ.pop("EMAIL_CC", None)
-
-
-def conectar_smtp(cfg, usuario: str, senha: str):
-    """Abre conexão segura (STARTTLS com certificado verificado) e autentica."""
-    s = cfg["smtp"]
-    try:
-        conexao = smtplib.SMTP(s.get("servidor", "smtp.office365.com"), s.getint("porta", 587),
-                               timeout=30)
-        conexao.ehlo()
-        conexao.starttls(context=ssl.create_default_context())
-        conexao.ehlo()
-        conexao.login(usuario, senha)
-        return conexao
-    except smtplib.SMTPAuthenticationError:
-        raise ErroFatal("Falha de autenticação no SMTP: usuário/senha incorretos ou envio SMTP "
-                        "desabilitado para a conta.") from None
-    except ssl.SSLError:
-        raise ErroFatal("Falha na conexão segura (TLS) com o servidor SMTP.") from None
-    except (OSError, smtplib.SMTPException) as e:
-        raise ErroFatal(f"Não foi possível conectar ao servidor SMTP ({type(e).__name__}).") from None
-
-
-def testar_login(cfg, usuario: str, senha: str):
-    """Valida usuário e senha no servidor, sem enviar nenhuma mensagem."""
-    conexao = conectar_smtp(cfg, usuario, senha)
-    try:
-        conexao.quit()
-    except Exception:
-        pass
+    """CCO de reserva do config.ini (o CCO de cada pessoa fica nas preferências da tela)."""
+    return cfg["email"].get("cco", "") or cfg["email"].get("cc", "")
 
 
 def carregar_config(caminho=None) -> configparser.ConfigParser:
     if caminho is None or Path(caminho) == ARQUIVO_CONFIG:
         caminho = dados.garantir_config()
     caminho = Path(caminho)
-    carregar_env()
     cfg = configparser.ConfigParser(interpolation=None)
     cfg.read(caminho, encoding="utf-8")
     return cfg
@@ -468,23 +471,18 @@ def html_para_texto(corpo: str) -> str:
     return re.sub(r"\n\s*\n+", "\n\n", re.sub(r"[ \t]+\n", "\n", t)).strip()
 
 
-def remetente_padrao(cfg) -> str:
-    """Remetente usado quando o campo fica vazio."""
-    if cfg["email"].get("metodo", "outlook") == "outlook":
-        return ""  # e-mail logado no Outlook
-    return os.environ.get("SMTP_USUARIO") or cfg["smtp"].get("remetente", "")
-
-
 class Enviador:
     """
-    Envia os e-mails de um lote pelo método do config.ini (smtp ou outlook).
-    No SMTP, abre UMA conexão segura (STARTTLS com certificado verificado) para o lote todo.
-    Uso:  with Enviador(cfg) as env: env.enviar(envio, remetente, cco)
+    Envia os e-mails de um lote pelo método do config.ini (microsoft ou outlook).
+    No método microsoft, abre UMA conexão segura (STARTTLS + XOAUTH2) para o lote todo, autenticada com a
+    conta Microsoft da pessoa; o remetente pode ser outra caixa ("Enviar como").
+    Uso:  with Enviador(cfg, conta) as env: env.enviar(envio, remetente, cco)
     """
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, conta=None):
         self.cfg = cfg
-        self.metodo = cfg["email"].get("metodo", "outlook").strip().lower()
+        self.conta = conta
+        self.metodo = metodo_envio(cfg)
         self.conexao = None
 
     def __enter__(self):
@@ -501,13 +499,27 @@ class Enviador:
                 pass
             self.conexao = None
 
+    def _email_conta(self) -> str:
+        email = self.conta.email() if self.conta is not None else None
+        if not email:
+            raise ErroSessao(f"Nenhuma conta Microsoft conectada. {MSG_SEM_CONTA}")
+        return email
+
     def _conectar(self):
-        s = self.cfg["smtp"]
-        usuario = os.environ.get("SMTP_USUARIO") or s.get("usuario", "")
-        senha = os.environ.get("SMTP_SENHA", "")
-        if not usuario or not senha:
-            raise ErroFatal("Credenciais SMTP não informadas. Use o botão 'Credenciais...' da tela.")
-        self.conexao = conectar_smtp(self.cfg, usuario, senha)
+        email = self._email_conta()
+        try:
+            token = self.conta.token()
+        except (FalhaLogin, ContaNaoConfigurada) as e:
+            raise ErroSessao(f"{e} {MSG_SEM_CONTA}") from None
+        try:
+            self.conexao = microsoft.abrir_smtp(email, token)
+        except smtplib.SMTPAuthenticationError:
+            raise ErroFatal("A Microsoft recusou o login no envio de e-mail: o envio SMTP pode estar "
+                            "desabilitado para a sua conta. Fale com a TI.") from None
+        except ssl.SSLError:
+            raise ErroFatal("Falha na conexão segura (TLS) com o servidor de e-mail.") from None
+        except (OSError, smtplib.SMTPException) as e:
+            raise ErroFatal(f"Não foi possível conectar ao servidor de e-mail ({type(e).__name__}).") from None
 
     def enviar(self, envio, remetente="", cco=""):
         para = list(dict.fromkeys(separar_emails(envio["email"])))
@@ -527,7 +539,7 @@ class Enviador:
                 raise ErroEnvio(f"Falha ao enviar pelo Outlook ({type(e).__name__}).") from None
             return
 
-        remetente = remetente or remetente_padrao(self.cfg)
+        remetente = remetente or self._email_conta()
         if emails_invalidos(remetente) or not remetente:
             raise ErroFatal(f"Remetente inválido: {remetente or '(vazio)'}")
         msg = EmailMessage()
@@ -552,8 +564,8 @@ class Enviador:
                 raise ErroEnvio(f"Destinatário recusado pelo servidor: {', '.join(e.recipients)}") from None
             except (smtplib.SMTPSenderRefused, smtplib.SMTPDataError) as e:
                 if b"SendAsDenied" in (e.smtp_error or b""):
-                    raise ErroFatal(f"O servidor recusou o remetente '{remetente}': a conta SMTP não "
-                                    "tem permissão para enviar como esse endereço.") from None
+                    raise ErroFatal(f"Sua conta não tem permissão para enviar como '{remetente}'. "
+                                    "Peça à TI a permissão 'Enviar como' nessa caixa.") from None
                 raise ErroEnvio(f"O servidor recusou a mensagem (código {e.smtp_code}).") from None
             except smtplib.SMTPException as e:
                 raise ErroEnvio(f"Erro no envio SMTP ({type(e).__name__}).") from None
@@ -678,15 +690,27 @@ def main():
             return
 
     PASTA_PREVIA.mkdir(parents=True, exist_ok=True)
-    remetente = cfg["email"].get("enviar_como", "")
-    cco = cco_padrao(cfg)
+    prefs = ler_prefs()
+    if migrar_env(prefs):
+        salvar_prefs(prefs)
+    metodo = metodo_envio(cfg)
+    conta = None
+    if metodo == "microsoft":
+        remetente = prefs.get("enviar_como", "")
+        if args.enviar:
+            conta, aviso = microsoft.criar_conta(logging.getLogger("robo_agregado"))
+            if conta is None or not conta.email():
+                sys.exit(aviso or f"Nenhuma conta Microsoft conectada. Abra o programa e {MSG_SEM_CONTA[0].lower()}{MSG_SEM_CONTA[1:]}")
+    else:
+        remetente = cfg["email"].get("enviar_como", "")
+    cco = prefs.get(f"cco_{metodo}", cco_padrao(cfg))
     intervalo = cfg["email"].getfloat("intervalo_segundos", 5)
     anteriores = envios_anteriores()
     inicio = datetime.now()
     enviados = []
     ok = falhas = 0
 
-    with Enviador(cfg) as enviador:
+    with Enviador(cfg, conta) as enviador:
         for e in envios:
             if e.get("erro"):
                 print(f"[AVISO] {formatar_documento(e['doc'])}: {e['erro']}")
@@ -726,7 +750,7 @@ def main():
                     print("Envio interrompido: o erro afeta todos os e-mails do lote.")
                     break
 
-    if enviados and cfg["email"].get("metodo", "outlook") == "outlook":
+    if enviados and metodo == "outlook":
         print(f"\nAguardando {ESPERA_RECUSAS}s por avisos de não entrega do servidor...")
         time.sleep(ESPERA_RECUSAS)
         recusas = buscar_recusas(inicio, [e["assunto"] for e in enviados])
