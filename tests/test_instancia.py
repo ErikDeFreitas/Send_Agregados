@@ -1,10 +1,12 @@
 import logging
+import threading
 
 import pytest
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 from tcm_ui.modulo import Contexto
 
 from robo_agregado import dados, instancia
+from robo_agregado import tela as tela_mod
 from robo_agregado.instancia import RoboAgregado
 
 
@@ -45,6 +47,46 @@ def test_pode_fechar_durante_envio(inst):
     assert inst.pode_fechar()  # antes de abrir a tela
     inst.widget("extrato").enviando = True
     assert not inst.pode_fechar()
+
+
+def test_fechar_durante_envio_espera_o_email_atual_ser_registrado(inst, monkeypatch):
+    tela = inst.widget("extrato")
+    em_envio, soltar, registros = threading.Event(), threading.Event(), []
+
+    class EnviadorLento:
+        def __init__(self, *_args):
+            pass
+
+        def enviar(self, *_args):
+            em_envio.set()
+            soltar.wait(5)
+
+        def fechar(self):
+            pass
+
+    tela.timer.stop()  # a fila não é lida: os extratos do teste não estão na tabela (e nada de Modal)
+    monkeypatch.setattr(tela, "metodo", "microsoft")
+    monkeypatch.setattr(tela_mod.ef, "Enviador", EnviadorLento)
+    monkeypatch.setattr(tela_mod.ef, "registrar_log", lambda doc, *_a: registros.append(doc))
+    envios = [{"doc": d, "nome": "Fulano", "email": "x@exemplo.com", "assunto": d} for d in ("1", "2")]
+    tela._thread_envio = threading.Thread(target=tela._enviar_thread, args=(envios, "", "", 0), daemon=True)
+    tela._thread_envio.start()
+    assert em_envio.wait(5)
+
+    threading.Timer(0.3, soltar.set).start()
+    QApplication.instance().aboutToQuit.emit()  # encerrar_envio: só volta com a thread terminada
+    assert not tela._thread_envio.is_alive()
+    assert registros == ["1"]  # o e-mail em curso foi registrado; o segundo não foi enviado
+
+
+def test_encerrar_envio_tem_limite(inst):
+    tela = inst.widget("extrato")
+    soltar = threading.Event()
+    tela._thread_envio = threading.Thread(target=soltar.wait, args=(5,), daemon=True)
+    tela._thread_envio.start()
+    tela.encerrar_envio(0.1)
+    assert tela.parar.is_set() and tela._thread_envio.is_alive()
+    soltar.set()
 
 
 def test_pasta_de_dados_abre_a_pasta(inst, monkeypatch):

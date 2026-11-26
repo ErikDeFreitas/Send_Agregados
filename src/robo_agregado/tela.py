@@ -12,7 +12,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QTimer
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QFileDialog, QGridLayout, QHBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QGridLayout, QHBoxLayout, QWidget
 from tcm_ui.components import (
     AreaLog, BarraProgresso, Botao, Campo, CampoTexto, Cartao, CartaoIndicador, Etiqueta,
     GradeResponsiva, Modal, Pagina, Tabela, Texto,
@@ -29,6 +29,7 @@ FABRICA_CONTA: Callable = microsoft.Conta  # os testes trocam por uma conta fals
 # coluna "Status" da lista e tom da etiqueta para cada marcação usada pela thread de envio
 COL_EMAIL, COL_STATUS = 4, 5
 TOM_STATUS = {"": "primaria", "enviado": "sucesso", "erro": "perigo"}
+LIMITE_ENCERRAR = 30  # s que o programa espera o e-mail atual ao fechar durante o envio
 
 
 class DialogoContaEnvio(Modal):
@@ -93,6 +94,11 @@ class TelaExtrato(Pagina):
         self.fila = queue.Queue()
         self.enviando = False
         self.parar = threading.Event()
+        self._thread_envio: threading.Thread | None = None
+        # "Fechar mesmo assim" durante o envio: pede parada e espera o e-mail atual ser enviado e registrado
+        # no log, senão um extrato enviado sem registro seria reenviado depois. A conexão com um método de
+        # QObject some sozinha quando a tela é destruída.
+        QApplication.instance().aboutToQuit.connect(self.encerrar_envio)
 
         # microsoft: conta da pessoa + "Enviar como" das preferências; outlook: enviar_como do config.ini
         self.metodo = ef.metodo_envio(self.cfg)
@@ -430,13 +436,25 @@ class TelaExtrato(Pagina):
         self.progresso.setValue(0)
         self.texto_progresso.setText(f"0 de {len(validos)} processados")
         envios = [dict(e) for e in validos]  # cópia: marcações de recusa não afetam a lista
-        threading.Thread(target=self._enviar_thread, args=(envios, remetente, cco, intervalo),
-                         daemon=True).start()
+        self._thread_envio = threading.Thread(target=self._enviar_thread, args=(envios, remetente, cco, intervalo),
+                                              daemon=True)
+        self._thread_envio.start()
 
     def parar_envio(self):
         self.parar.set()
         self.btn_parar.setEnabled(False)
         self.escrever_log("Parando após o envio atual...")
+
+    def encerrar_envio(self, limite: float = LIMITE_ENCERRAR) -> None:
+        """Ao sair do programa: para depois do e-mail atual e espera (até `limite` s) a thread terminar."""
+        thread = self._thread_envio
+        if thread is None or not thread.is_alive():
+            return
+        self.parar.set()
+        self.contexto.log.info("Programa fechando durante o envio: parando após o e-mail atual")
+        thread.join(limite)
+        if thread.is_alive():
+            self.contexto.log.warning("O envio não terminou em %g s; o programa fecha assim mesmo", limite)
 
     def _aguardar_recusas(self, inicio, envios, espera) -> bool:
         """Consulta a Caixa de Entrada por avisos de não entrega; marca os recusados."""
